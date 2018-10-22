@@ -14,9 +14,8 @@
 //
 //
 
-java_library_static {
+java_library_host {
     name: "grpc-java-stub",
-    host_supported: true,
     srcs: [
         "src/main/java/**/*.java",
     ],
