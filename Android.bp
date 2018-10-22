@@ -19,6 +19,7 @@ java_library_host {
     static_libs: [
         "grpc-java-core",
 	"grpc-java-context",
+	"grpc-java-protobuf",
 	"grpc-java-stub",
 	"grpc-java-netty-shaded",
     ]

@@ -12,20 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-//
+// TODO: build from source instead
 
-java_library_static {
+java_import_host {
     name: "grpc-java-core",
-    host_supported: true,
-    srcs: [
-        "src/main/java/io/grpc/*.java",
-    ],
-    java_resource_dirs: [
-        "core/src/main/resources",
-    ],
-    libs: [
-        "grpc-java-context",
-        "guava",
-        "jsr305",
+    jars: [
+        "grpc-core-1.14.0.jar",
     ],
 }
+
