@@ -12,12 +12,63 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// TODO: build from source instead
 
-java_import_host {
+java_library_host {
     name: "grpc-java-core",
-    jars: [
-        "grpc-core-1.14.0.jar",
+    srcs: [
+        "src/main/java/io/grpc/*.java",
+    ],
+    java_resource_dirs: [
+        "src/main/resources",
+    ],
+    libs: [
+        "grpc-java-context",
+        "jsr305",
+        "guava",
     ],
 }
 
+java_library_host {
+    name: "grpc-java-core-inprocess",
+    srcs: [
+        "src/main/java/io/grpc/inprocess/*.java",
+    ],
+    libs: [
+        "grpc-java-core",
+        "grpc-java-core-internal",
+        "grpc-java-context",
+        "jsr305",
+        "guava",
+    ],
+}
+
+java_library_host {
+    name: "grpc-java-core-internal",
+    srcs: [
+        "src/main/java/io/grpc/internal/*.java",
+    ],
+    libs: [
+        "grpc-java-annotation-stubs",
+        "grpc-java-core",
+        "grpc-java-context",
+        "jsr305",
+        "gson-prebuilt-jar",
+        "error_prone_annotations",
+        "guava",
+        "opencensus-java-api",
+        "opencensus-java-contrib-grpc-metrics",
+    ],
+}
+
+java_library_host {
+    name: "grpc-java-core-util",
+    srcs: [
+        "src/main/java/io/grpc/util/*.java",
+    ],
+    libs: [
+        "grpc-java-core",
+        "grpc-java-core-internal",
+        "jsr305",
+        "guava",
+    ],
+}
