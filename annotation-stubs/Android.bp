@@ -1,4 +1,3 @@
-//
 // Copyright (C) 2018 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,20 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-//
 
 java_library_host {
-    name: "grpc-java-protobuf",
+    name: "grpc-java-annotation-stubs",
     srcs: [
-        "src/main/java/**/*.java",
+        ":grpc-java-annotation-stubs-srcjar",
     ],
-    libs: [
-        "grpc-java-core",
-        "grpc-java-protobuf-lite",
-        "com.google.api.grpc_proto-google-common-protos-prebuilt-jar",
-        "jsr305",
-        "guava",
-        "libprotobuf-java-full",
-        "libprotobuf-java-util-full",
+}
+
+gensrcs {
+    name: "grpc-java-annotation-stubs-srcjar",
+    tool_files: [
+        "gen_annotations.py",
     ],
+    tools: [
+        "soong_zip",
+    ],
+    cmd: "$(location gen_annotations.py) $(genDir)/java && " +
+         "$(location soong_zip) -jar -o $(out) -C $(genDir)/java -D $(genDir)/java",
+    srcs: [
+        // A dummy source file since Soong crashes otherwise.
+        "Android.bp",
+    ],
+    output_extension: "srcjar",
 }

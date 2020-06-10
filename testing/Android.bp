@@ -1,5 +1,4 @@
-//
-// Copyright (C) 2018 The Android Open Source Project
+// Copyright (C) 2020 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,17 +15,23 @@
 //
 
 java_library_host {
-    name: "grpc-java-protobuf",
+    name: "grpc-java-testing",
     srcs: [
-        "src/main/java/**/*.java",
+        "src/main/java/io/grpc/testing/*.java",
+    ],
+    java_resource_dirs: [
+        "src/main/resources",
     ],
     libs: [
+        "grpc-java-context",
         "grpc-java-core",
-        "grpc-java-protobuf-lite",
-        "com.google.api.grpc_proto-google-common-protos-prebuilt-jar",
+        "grpc-java-core-inprocess",
+        "grpc-java-core-internal", // Not sure why this has to be here.
+        "grpc-java-core-util",
+        "grpc-java-stub",
         "jsr305",
         "guava",
-        "libprotobuf-java-full",
-        "libprotobuf-java-util-full",
+        "truth-prebuilt",
+        "junit",
     ],
 }
