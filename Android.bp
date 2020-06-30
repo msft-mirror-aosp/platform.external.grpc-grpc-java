@@ -23,7 +23,6 @@ java_library_host {
         "grpc-java-core-inprocess",
         "grpc-java-core-internal",
         "grpc-java-core-util",
-        "grpc-java-netty-shaded",
         "grpc-java-protobuf",
         "grpc-java-protobuf-lite",
         "grpc-java-stub",
