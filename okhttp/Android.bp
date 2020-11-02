@@ -29,6 +29,6 @@ java_library_host {
         "guava",
     ],
     static_libs: [
-        "okhttp",
+        "okhttp-norepackage",
     ],
 }
