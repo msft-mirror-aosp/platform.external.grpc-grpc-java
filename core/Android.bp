@@ -13,8 +13,9 @@
 // limitations under the License.
 //
 
-java_library_host {
+java_library {
     name: "grpc-java-core",
+    host_supported: true,
     srcs: [
         "src/main/java/io/grpc/*.java",
     ],
@@ -26,10 +27,12 @@ java_library_host {
         "jsr305",
         "guava",
     ],
+    sdk_version: "current",
 }
 
-java_library_host {
+java_library {
     name: "grpc-java-core-inprocess",
+    host_supported: true,
     srcs: [
         "src/main/java/io/grpc/inprocess/*.java",
     ],
@@ -40,10 +43,12 @@ java_library_host {
         "jsr305",
         "guava",
     ],
+    sdk_version: "current",
 }
 
-java_library_host {
+java_library {
     name: "grpc-java-core-internal",
+    host_supported: true,
     srcs: [
         "src/main/java/io/grpc/internal/*.java",
     ],
@@ -58,10 +63,23 @@ java_library_host {
         "opencensus-java-api",
         "opencensus-java-contrib-grpc-metrics",
     ],
+    target: {
+
+        // For the Android variant, ignore this class since it is optional,
+        // uses javax APIs not available on Android, and is used reflectively
+        // so ignoring it does not affect the functionality of the library.
+        android: {
+            exclude_srcs: [
+                "src/main/java/io/grpc/internal/JndiResourceResolverFactory.java",
+            ],
+        },
+    },
+    sdk_version: "current",
 }
 
-java_library_host {
+java_library {
     name: "grpc-java-core-util",
+    host_supported: true,
     srcs: [
         "src/main/java/io/grpc/util/*.java",
     ],
@@ -71,4 +89,5 @@ java_library_host {
         "jsr305",
         "guava",
     ],
+    sdk_version: "current",
 }

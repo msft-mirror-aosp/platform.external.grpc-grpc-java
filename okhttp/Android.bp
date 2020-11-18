@@ -13,8 +13,9 @@
 // limitations under the License.
 //
 
-java_library_host {
+java_library {
     name: "grpc-java-okhttp",
+    host_supported: true,
     srcs: [
         "third_party/okhttp/main/java/**/*.java",
         "src/main/java/**/*.java",
@@ -31,4 +32,5 @@ java_library_host {
     static_libs: [
         "okhttp-norepackage",
     ],
+    sdk_version: "current",
 }

@@ -28,3 +28,17 @@ java_library_host {
         "grpc-java-stub",
     ]
 }
+
+java_library {
+    name: "grpc-java-okhttp-client-lite",
+    host_supported: true,
+    static_libs: [
+        "grpc-java-stub",
+        "grpc-java-context",
+        "grpc-java-core",
+        "grpc-java-core-internal",
+        "grpc-java-protobuf-lite",
+        "grpc-java-okhttp",
+    ],
+    sdk_version: "current",
+}
