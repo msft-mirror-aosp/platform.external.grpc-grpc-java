@@ -14,8 +14,9 @@
 //
 //
 
-java_library_host {
+java_library {
     name: "grpc-java-protobuf-lite",
+    host_supported: true,
     srcs: [
         "src/main/java/**/*.java",
     ],
@@ -23,6 +24,7 @@ java_library_host {
         "grpc-java-core",
         "guava",
         "jsr305",
-        "libprotobuf-java-full",
+        "libprotobuf-java-lite",
     ],
+    sdk_version: "current",
 }
