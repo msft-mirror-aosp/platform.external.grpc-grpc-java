@@ -14,8 +14,9 @@
 //
 //
 
-java_library_host {
+java_library {
     name: "grpc-java-testing",
+    host_supported: true,
     srcs: [
         "src/main/java/io/grpc/testing/*.java",
     ],
@@ -34,4 +35,5 @@ java_library_host {
         "truth-prebuilt",
         "junit",
     ],
+    sdk_version: "current",
 }
