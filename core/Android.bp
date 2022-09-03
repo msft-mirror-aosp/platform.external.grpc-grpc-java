@@ -66,7 +66,7 @@ java_library {
         "grpc-java-core",
         "grpc-java-context",
         "jsr305",
-        "gson-prebuilt-jar",
+        "gson",
         "error_prone_annotations",
         "guava",
         "opencensus-java-api",
