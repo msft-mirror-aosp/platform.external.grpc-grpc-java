@@ -88,6 +88,12 @@ java_library {
     sdk_version: "current",
     min_sdk_version: "33",
     apex_available: ["com.android.adservices"],
+
+    errorprone: {
+        javacflags: [
+            "-Xep:BanJNDI:WARN",
+        ],
+    },
 }
 
 java_library {
