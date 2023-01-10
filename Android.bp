@@ -63,7 +63,10 @@ java_library {
         "grpc-java-protobuf-lite",
         "grpc-java-stub",
     ],
-    visibility: ["//packages/modules/Bluetooth/android/blueberry/server"],
+    visibility: [
+        "//packages/modules/Bluetooth/pandora/interfaces",
+        "//packages/modules/Bluetooth/android/pandora/server",
+    ],
 }
 
 java_library {
