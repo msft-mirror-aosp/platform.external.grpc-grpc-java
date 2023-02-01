@@ -37,5 +37,8 @@ java_library {
     ],
     sdk_version: "current",
     min_sdk_version: "33",
-    apex_available: ["com.android.adservices"],
+    apex_available: [
+        "com.android.adservices",
+        "com.android.devicelock",
+    ],
 }
