@@ -35,6 +35,8 @@ java_library {
         "guava",
         "jsr305",
     ],
+    // b/267831518: Pin tradefed and dependencies to Java 11.
+    java_version: "11",
     sdk_version: "current",
     min_sdk_version: "33",
     apex_available: [
