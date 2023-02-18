@@ -81,8 +81,8 @@ java_library {
         "grpc-java-okhttp",
     ],
     sdk_version: "current",
-    min_sdk_version: "33",
-    apex_available: ["com.android.adservices"],
+    min_sdk_version: "30",
+    apex_available: ["com.android.adservices", "com.android.extservices"],
 }
 
 java_library {
@@ -98,7 +98,7 @@ java_library {
         "guava",
     ],
     sdk_version: "current",
-    min_sdk_version: "33",
-    apex_available: ["com.android.adservices"],
+    min_sdk_version: "30",
+    apex_available: ["com.android.adservices", "com.android.extservices"],
 }
 
