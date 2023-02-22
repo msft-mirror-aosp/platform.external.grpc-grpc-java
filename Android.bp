@@ -63,11 +63,6 @@ java_library {
         "grpc-java-protobuf-lite",
         "grpc-java-stub",
     ],
-    visibility: [
-        "//packages/modules/Bluetooth/pandora/interfaces",
-        "//packages/modules/Bluetooth/android/pandora/server",
-        "//external/pandora/bt-test-interfaces",
-    ],
 }
 
 java_library {
@@ -82,10 +77,11 @@ java_library {
         "grpc-java-okhttp",
     ],
     sdk_version: "current",
-    min_sdk_version: "33",
+    min_sdk_version: "30",
     apex_available: [
         "com.android.adservices",
         "com.android.devicelock",
+        "com.android.extservices"
     ],
 }
 
@@ -102,9 +98,10 @@ java_library {
         "guava",
     ],
     sdk_version: "current",
-    min_sdk_version: "33",
+    min_sdk_version: "30",
     apex_available: [
         "com.android.adservices",
         "com.android.devicelock",
+        "com.android.extservices",
     ],
 }
