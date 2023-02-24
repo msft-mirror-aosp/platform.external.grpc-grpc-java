@@ -81,7 +81,7 @@ java_library {
     apex_available: [
         "com.android.adservices",
         "com.android.devicelock",
-        "com.android.extservices"
+        "com.android.extservices",
     ],
 }
 
