@@ -26,6 +26,7 @@ import com.google.common.util.concurrent.SettableFuture;
 import io.grpc.Attributes;
 import io.grpc.CallOptions;
 import io.grpc.ClientCall;
+import io.grpc.ClientStreamTracer;
 import io.grpc.ConnectivityState;
 import io.grpc.ConnectivityStateInfo;
 import io.grpc.Context;
@@ -45,7 +46,8 @@ import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
-import io.grpc.internal.ClientCallImpl.ClientTransportProvider;
+import io.grpc.SynchronizationContext;
+import io.grpc.internal.ClientCallImpl.ClientStreamProvider;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -54,8 +56,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import javax.annotation.CheckForNull;
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -70,7 +70,7 @@ final class OobChannel extends ManagedChannel implements InternalInstrumented<Ch
   private AbstractSubchannel subchannelImpl;
   private SubchannelPicker subchannelPicker;
 
-  private final InternalLogId logId = InternalLogId.allocate(getClass().getName());
+  private final InternalLogId logId;
   private final String authority;
   private final DelayedClientTransport delayedTransport;
   private final InternalChannelz channelz;
@@ -80,37 +80,39 @@ final class OobChannel extends ManagedChannel implements InternalInstrumented<Ch
   private final CountDownLatch terminatedLatch = new CountDownLatch(1);
   private volatile boolean shutdown;
   private final CallTracer channelCallsTracer;
-  @CheckForNull
   private final ChannelTracer channelTracer;
   private final TimeProvider timeProvider;
 
-  private final ClientTransportProvider transportProvider = new ClientTransportProvider() {
+  private final ClientStreamProvider transportProvider = new ClientStreamProvider() {
     @Override
-    public ClientTransport get(PickSubchannelArgs args) {
+    public ClientStream newStream(MethodDescriptor<?, ?> method,
+        CallOptions callOptions, Metadata headers, Context context) {
+      ClientStreamTracer[] tracers = GrpcUtil.getClientStreamTracers(
+          callOptions, headers, 0, /* isTransparentRetry= */ false);
+      Context origContext = context.attach();
       // delayed transport's newStream() always acquires a lock, but concurrent performance doesn't
       // matter here because OOB communication should be sparse, and it's not on application RPC's
       // critical path.
-      return delayedTransport;
-    }
-
-    @Override
-    public <ReqT> RetriableStream<ReqT> newRetriableStream(MethodDescriptor<ReqT, ?> method,
-        CallOptions callOptions, Metadata headers, Context context) {
-      throw new UnsupportedOperationException("OobChannel should not create retriable streams");
+      try {
+        return delayedTransport.newStream(method, headers, callOptions, tracers);
+      } finally {
+        context.detach(origContext);
+      }
     }
   };
 
   OobChannel(
       String authority, ObjectPool<? extends Executor> executorPool,
-      ScheduledExecutorService deadlineCancellationExecutor, ChannelExecutor channelExecutor,
-      CallTracer callsTracer, @Nullable  ChannelTracer channelTracer, InternalChannelz channelz,
+      ScheduledExecutorService deadlineCancellationExecutor, SynchronizationContext syncContext,
+      CallTracer callsTracer, ChannelTracer channelTracer, InternalChannelz channelz,
       TimeProvider timeProvider) {
     this.authority = checkNotNull(authority, "authority");
+    this.logId = InternalLogId.allocate(getClass(), authority);
     this.executorPool = checkNotNull(executorPool, "executorPool");
     this.executor = checkNotNull(executorPool.getObject(), "executor");
     this.deadlineCancellationExecutor = checkNotNull(
         deadlineCancellationExecutor, "deadlineCancellationExecutor");
-    this.delayedTransport = new DelayedClientTransport(executor, channelExecutor);
+    this.delayedTransport = new DelayedClientTransport(executor, syncContext);
     this.channelz = Preconditions.checkNotNull(channelz);
     this.delayedTransport.start(new ManagedClientTransport.Listener() {
         @Override
@@ -134,8 +136,8 @@ final class OobChannel extends ManagedChannel implements InternalInstrumented<Ch
         }
       });
     this.channelCallsTracer = callsTracer;
-    this.channelTracer = channelTracer;
-    this.timeProvider = timeProvider;
+    this.channelTracer = checkNotNull(channelTracer, "channelTracer");
+    this.timeProvider = checkNotNull(timeProvider, "timeProvider");
   }
 
   // Must be called only once, right after the OobChannel is created.
@@ -149,12 +151,7 @@ final class OobChannel extends ManagedChannel implements InternalInstrumented<Ch
         }
 
         @Override
-        ClientTransport obtainActiveTransport() {
-          return subchannel.obtainActiveTransport();
-        }
-
-        @Override
-        InternalInstrumented<ChannelStats> getInternalSubchannel() {
+        InternalInstrumented<ChannelStats> getInstrumentedInternalSubchannel() {
           return subchannel;
         }
 
@@ -172,30 +169,43 @@ final class OobChannel extends ManagedChannel implements InternalInstrumented<Ch
         public Attributes getAttributes() {
           return Attributes.EMPTY;
         }
-    };
-
-    subchannelPicker = new SubchannelPicker() {
-        final PickResult result = PickResult.withSubchannel(subchannelImpl);
 
         @Override
-        public PickResult pickSubchannel(PickSubchannelArgs args) {
-          return result;
+        public Object getInternalSubchannel() {
+          return subchannel;
         }
-      };
+    };
+
+    final class OobSubchannelPicker extends SubchannelPicker {
+      final PickResult result = PickResult.withSubchannel(subchannelImpl);
+
+      @Override
+      public PickResult pickSubchannel(PickSubchannelArgs args) {
+        return result;
+      }
+
+      @Override
+      public String toString() {
+        return MoreObjects.toStringHelper(OobSubchannelPicker.class)
+            .add("result", result)
+            .toString();
+      }
+    }
+
+    subchannelPicker = new OobSubchannelPicker();
     delayedTransport.reprocess(subchannelPicker);
   }
 
-  void updateAddresses(EquivalentAddressGroup eag) {
-    subchannel.updateAddresses(Collections.singletonList(eag));
+  void updateAddresses(List<EquivalentAddressGroup> eag) {
+    subchannel.updateAddresses(eag);
   }
 
   @Override
   public <RequestT, ResponseT> ClientCall<RequestT, ResponseT> newCall(
       MethodDescriptor<RequestT, ResponseT> methodDescriptor, CallOptions callOptions) {
-    return new ClientCallImpl<RequestT, ResponseT>(methodDescriptor,
+    return new ClientCallImpl<>(methodDescriptor,
         callOptions.getExecutor() == null ? executor : callOptions.getExecutor(),
-        callOptions, transportProvider, deadlineCancellationExecutor, channelCallsTracer,
-        false /* retryEnabled */);
+        callOptions, transportProvider, deadlineCancellationExecutor, channelCallsTracer, null);
   }
 
   @Override
@@ -242,28 +252,35 @@ final class OobChannel extends ManagedChannel implements InternalInstrumented<Ch
   }
 
   void handleSubchannelStateChange(final ConnectivityStateInfo newState) {
-    if (channelTracer != null) {
-      channelTracer.reportEvent(
-          new ChannelTrace.Event.Builder()
-              .setDescription("Entering " + newState.getState() + " state")
-              .setSeverity(ChannelTrace.Event.Severity.CT_INFO)
-              .setTimestampNanos(timeProvider.currentTimeNanos())
-              .build());
-    }
+    channelTracer.reportEvent(
+        new ChannelTrace.Event.Builder()
+            .setDescription("Entering " + newState.getState() + " state")
+            .setSeverity(ChannelTrace.Event.Severity.CT_INFO)
+            .setTimestampNanos(timeProvider.currentTimeNanos())
+            .build());
     switch (newState.getState()) {
       case READY:
       case IDLE:
         delayedTransport.reprocess(subchannelPicker);
         break;
       case TRANSIENT_FAILURE:
-        delayedTransport.reprocess(new SubchannelPicker() {
-            final PickResult errorResult = PickResult.withError(newState.getStatus());
+        final class OobErrorPicker extends SubchannelPicker {
+          final PickResult errorResult = PickResult.withError(newState.getStatus());
 
-            @Override
-            public PickResult pickSubchannel(PickSubchannelArgs args) {
-              return errorResult;
-            }
-          });
+          @Override
+          public PickResult pickSubchannel(PickSubchannelArgs args) {
+            return errorResult;
+          }
+
+          @Override
+          public String toString() {
+            return MoreObjects.toStringHelper(OobErrorPicker.class)
+                .add("errorResult", errorResult)
+                .toString();
+          }
+        }
+
+        delayedTransport.reprocess(new OobErrorPicker());
         break;
       default:
         // Do nothing
@@ -293,9 +310,7 @@ final class OobChannel extends ManagedChannel implements InternalInstrumented<Ch
     final SettableFuture<ChannelStats> ret = SettableFuture.create();
     final ChannelStats.Builder builder = new ChannelStats.Builder();
     channelCallsTracer.updateBuilder(builder);
-    if (channelTracer != null) {
-      channelTracer.updateBuilder(builder);
-    }
+    channelTracer.updateBuilder(builder);
     builder
         .setTarget(authority)
         .setState(subchannel.getState())

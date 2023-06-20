@@ -54,7 +54,7 @@ public final class TsiPeer {
     private final String name;
     private final T value;
 
-    public Property(@Nonnull String name, @Nonnull T value) {
+    protected Property(@Nonnull String name, @Nonnull T value) {
       this.name = name;
       this.value = value;
     }
@@ -70,6 +70,13 @@ public final class TsiPeer {
     @Override
     public String toString() {
       return String.format("%s=%s", name, value);
+    }
+  }
+
+  /** A peer property corresponding to a boolean. */
+  public static final class BooleanProperty extends Property<Boolean> {
+    public BooleanProperty(@Nonnull String name, boolean value) {
+      super(name, value);
     }
   }
 

@@ -27,6 +27,7 @@ import io.grpc.internal.ObjectPool;
 import io.grpc.internal.ServerListener;
 import io.grpc.internal.ServerTransportListener;
 import java.io.IOException;
+import java.net.SocketAddress;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,13 +38,19 @@ import javax.annotation.concurrent.ThreadSafe;
 @ThreadSafe
 final class InProcessServer implements InternalServer {
   private static final ConcurrentMap<String, InProcessServer> registry
-      = new ConcurrentHashMap<String, InProcessServer>();
+      = new ConcurrentHashMap<>();
 
-  static InProcessServer findServer(String name) {
-    return registry.get(name);
+  static InProcessServer findServer(SocketAddress addr) {
+    if (addr instanceof AnonymousInProcessSocketAddress) {
+      return ((AnonymousInProcessSocketAddress) addr).getServer();
+    } else if (addr instanceof InProcessSocketAddress) {
+      return registry.get(((InProcessSocketAddress) addr).getName());
+    }
+    return null;
   }
 
-  private final String name;
+  private final SocketAddress listenAddress;
+  private final int maxInboundMetadataSize;
   private final List<ServerStreamTracer.Factory> streamTracerFactories;
   private ServerListener listener;
   private boolean shutdown;
@@ -56,10 +63,11 @@ final class InProcessServer implements InternalServer {
   private ScheduledExecutorService scheduler;
 
   InProcessServer(
-      String name, ObjectPool<ScheduledExecutorService> schedulerPool,
-      List<ServerStreamTracer.Factory> streamTracerFactories) {
-    this.name = name;
-    this.schedulerPool = schedulerPool;
+      InProcessServerBuilder builder,
+      List<? extends ServerStreamTracer.Factory> streamTracerFactories) {
+    this.listenAddress = builder.listenAddress;
+    this.schedulerPool = builder.schedulerPool;
+    this.maxInboundMetadataSize = builder.maxInboundMetadataSize;
     this.streamTracerFactories =
         Collections.unmodifiableList(checkNotNull(streamTracerFactories, "streamTracerFactories"));
   }
@@ -69,26 +77,45 @@ final class InProcessServer implements InternalServer {
     this.listener = serverListener;
     this.scheduler = schedulerPool.getObject();
     // Must be last, as channels can start connecting after this point.
-    if (registry.putIfAbsent(name, this) != null) {
-      throw new IOException("name already registered: " + name);
+    registerInstance();
+  }
+
+  private void registerInstance() throws IOException {
+    if (listenAddress instanceof AnonymousInProcessSocketAddress) {
+      ((AnonymousInProcessSocketAddress) listenAddress).setServer(this);
+    } else if (listenAddress instanceof InProcessSocketAddress) {
+      String name = ((InProcessSocketAddress) listenAddress).getName();
+      if (registry.putIfAbsent(name, this) != null) {
+        throw new IOException("name already registered: " + name);
+      }
+    } else {
+      throw new AssertionError();
     }
   }
 
   @Override
-  public int getPort() {
-    return -1;
+  public SocketAddress getListenSocketAddress() {
+    return listenAddress;
   }
 
   @Override
-  public List<InternalInstrumented<SocketStats>> getListenSockets() {
-    return Collections.emptyList();
+  public List<? extends SocketAddress> getListenSocketAddresses() {
+    return Collections.singletonList(getListenSocketAddress());
+  }
+
+  @Override
+  public InternalInstrumented<SocketStats> getListenSocketStats() {
+    return null;
+  }
+
+  @Override
+  public List<InternalInstrumented<SocketStats>> getListenSocketStatsList() {
+    return null;
   }
 
   @Override
   public void shutdown() {
-    if (!registry.remove(name, this)) {
-      throw new AssertionError();
-    }
+    unregisterInstance();
     scheduler = schedulerPool.returnObject(scheduler);
     synchronized (this) {
       shutdown = true;
@@ -96,9 +123,22 @@ final class InProcessServer implements InternalServer {
     }
   }
 
+  private void unregisterInstance() {
+    if (listenAddress instanceof AnonymousInProcessSocketAddress) {
+      ((AnonymousInProcessSocketAddress) listenAddress).clearServer(this);
+    } else if (listenAddress instanceof InProcessSocketAddress) {
+      String name = ((InProcessSocketAddress) listenAddress).getName();
+      if (!registry.remove(name, this)) {
+        throw new AssertionError();
+      }
+    } else {
+      throw new AssertionError();
+    }
+  }
+
   @Override
   public String toString() {
-    return MoreObjects.toStringHelper(this).add("name", name).toString();
+    return MoreObjects.toStringHelper(this).add("listenAddress", listenAddress).toString();
   }
 
   synchronized ServerTransportListener register(InProcessTransport transport) {
@@ -110,6 +150,10 @@ final class InProcessServer implements InternalServer {
 
   ObjectPool<ScheduledExecutorService> getScheduledExecutorServicePool() {
     return schedulerPool;
+  }
+
+  int getMaxInboundMetadataSize() {
+    return maxInboundMetadataSize;
   }
 
   List<ServerStreamTracer.Factory> getStreamTracerFactories() {

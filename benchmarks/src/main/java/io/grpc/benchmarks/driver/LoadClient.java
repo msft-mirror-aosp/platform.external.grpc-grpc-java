@@ -82,7 +82,7 @@ class LoadClient {
       channels[i] =
           Utils.newClientChannel(
               Epoll.isAvailable() ?  Transport.NETTY_EPOLL : Transport.NETTY_NIO,
-              Utils.parseSocketAddress(config.getServerTargets(i % config.getServerTargetsCount())),
+              config.getServerTargets(i % config.getServerTargetsCount()),
               config.hasSecurityParams(),
               config.hasSecurityParams() && config.getSecurityParams().getUseTestCa(),
               config.hasSecurityParams()
@@ -245,9 +245,9 @@ class LoadClient {
       latenciesBuilder.addBucket(0);
       base = base * resolution;
     }
-    latenciesBuilder.setMaxSeen(intervalHistogram.getMaxValue());
-    latenciesBuilder.setMinSeen(intervalHistogram.getMinNonZeroValue());
-    latenciesBuilder.setCount(intervalHistogram.getTotalCount());
+    latenciesBuilder.setMaxSeen((double) intervalHistogram.getMaxValue());
+    latenciesBuilder.setMinSeen((double) intervalHistogram.getMinNonZeroValue());
+    latenciesBuilder.setCount((double) intervalHistogram.getTotalCount());
     latenciesBuilder.setSum(intervalHistogram.getMean()
         * intervalHistogram.getTotalCount());
     // TODO: No support for sum of squares
@@ -379,7 +379,7 @@ class LoadClient {
       while (!shutdown) {
         maxOutstanding.acquireUninterruptibly();
         final AtomicReference<StreamObserver<Messages.SimpleRequest>> requestObserver =
-            new AtomicReference<StreamObserver<Messages.SimpleRequest>>();
+            new AtomicReference<>();
         requestObserver.set(stub.streamingCall(
             new StreamObserver<Messages.SimpleResponse>() {
               long now = System.nanoTime();

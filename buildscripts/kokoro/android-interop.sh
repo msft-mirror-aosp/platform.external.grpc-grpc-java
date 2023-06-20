@@ -16,22 +16,43 @@ export CXXFLAGS=-I/tmp/protobuf/include
 export LD_LIBRARY_PATH=/tmp/protobuf/lib
 export OS_NAME=$(uname)
 
+echo y | ${ANDROID_HOME}/tools/bin/sdkmanager "build-tools;28.0.3"
+
 # Proto deps
 buildscripts/make_dependencies.sh
 
-./gradlew install
+# Build Android with Java 11, this adds it to the PATH
+sudo update-java-alternatives --set java-1.11.0-openjdk-amd64
+# Unset any existing JAVA_HOME env var to stop Gradle from using it
+unset JAVA_HOME
 
+GRADLE_FLAGS="-Pandroid.useAndroidX=true"
 
 # Build and run interop instrumentation tests on Firebase Test Lab
 cd android-interop-testing
-../gradlew assembleDebug
-../gradlew assembleDebugAndroidTest
+../gradlew assembleDebug $GRADLE_FLAGS
+../gradlew assembleDebugAndroidTest $GRADLE_FLAGS
 gcloud firebase test android run \
   --type instrumentation \
-  --app app/build/outputs/apk/debug/app-debug.apk \
-  --test app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
+  --app build/outputs/apk/debug/grpc-android-interop-testing-debug.apk \
+  --test build/outputs/apk/androidTest/debug/grpc-android-interop-testing-debug-androidTest.apk \
   --environment-variables \
       server_host=grpc-test.sandbox.googleapis.com,server_port=443,test_case=all \
+  --device model=Nexus6P,version=27,locale=en,orientation=portrait \
+  --device model=Nexus6P,version=26,locale=en,orientation=portrait \
+  --device model=Nexus6P,version=25,locale=en,orientation=portrait \
+  --device model=Nexus6P,version=24,locale=en,orientation=portrait \
+  --device model=Nexus6P,version=23,locale=en,orientation=portrait \
+  --device model=Nexus6,version=22,locale=en,orientation=portrait \
+  --device model=Nexus6,version=21,locale=en,orientation=portrait
+
+# Build and run binderchannel instrumentation tests on Firebase Test Lab
+cd ../binder
+../gradlew assembleDebugAndroidTest $GRADLE_FLAGS
+gcloud firebase test android run \
+  --type instrumentation \
+  --app ../android-interop-testing/build/outputs/apk/debug/grpc-android-interop-testing-debug.apk \
+  --test build/outputs/apk/androidTest/debug/grpc-binder-debug-androidTest.apk \
   --device model=Nexus6P,version=27,locale=en,orientation=portrait \
   --device model=Nexus6P,version=26,locale=en,orientation=portrait \
   --device model=Nexus6P,version=25,locale=en,orientation=portrait \
