@@ -33,6 +33,10 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.EventLoop;
 import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.handler.codec.http2.Http2Stream;
+import io.perfmark.Link;
+import io.perfmark.PerfMark;
+import io.perfmark.Tag;
+import io.perfmark.TaskCloseable;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -45,11 +49,11 @@ class NettyServerStream extends AbstractServerStream {
 
   private final Sink sink = new Sink();
   private final TransportState state;
-  private final Channel channel;
   private final WriteQueue writeQueue;
   private final Attributes attributes;
   private final String authority;
   private final TransportTracer transportTracer;
+  private final int streamId;
 
   public NettyServerStream(
       Channel channel,
@@ -60,11 +64,12 @@ class NettyServerStream extends AbstractServerStream {
       TransportTracer transportTracer) {
     super(new NettyWritableBufferAllocator(channel.alloc()), statsTraceCtx);
     this.state = checkNotNull(state, "transportState");
-    this.channel = checkNotNull(channel, "channel");
     this.writeQueue = state.handler.getWriteQueue();
     this.attributes = checkNotNull(transportAttrs);
     this.authority = authority;
     this.transportTracer = checkNotNull(transportTracer, "transportTracer");
+    // Read the id early to avoid reading transportState later.
+    this.streamId = transportState().id();
   }
 
   @Override
@@ -89,37 +94,19 @@ class NettyServerStream extends AbstractServerStream {
 
   private class Sink implements AbstractServerStream.Sink {
     @Override
-    public void request(final int numMessages) {
-      if (channel.eventLoop().inEventLoop()) {
-        // Processing data read in the event loop so can call into the deframer immediately
-        transportState().requestMessagesFromDeframer(numMessages);
-      } else {
-        channel.eventLoop().execute(new Runnable() {
-          @Override
-          public void run() {
-            transportState().requestMessagesFromDeframer(numMessages);
-          }
-        });
-      }
-    }
-
-    @Override
     public void writeHeaders(Metadata headers) {
-      writeQueue.enqueue(
-          SendResponseHeadersCommand.createHeaders(
-              transportState(),
-              Utils.convertServerHeaders(headers)),
-          true);
+      try (TaskCloseable ignore = PerfMark.traceTask("NettyServerStream$Sink.writeHeaders")) {
+        writeQueue.enqueue(
+            SendResponseHeadersCommand.createHeaders(
+                transportState(),
+                Utils.convertServerHeaders(headers)),
+            true);
+      }
     }
 
-    @Override
-    public void writeFrame(WritableBuffer frame, boolean flush, final int numMessages) {
+    private void writeFrameInternal(WritableBuffer frame, boolean flush, final int numMessages) {
       Preconditions.checkArgument(numMessages >= 0);
-      if (frame == null) {
-        writeQueue.scheduleFlush();
-        return;
-      }
-      ByteBuf bytebuf = ((NettyWritableBuffer) frame).bytebuf();
+      ByteBuf bytebuf = ((NettyWritableBuffer) frame).bytebuf().touch();
       final int numBytes = bytebuf.readableBytes();
       // Add the bytes to outbound flow control.
       onSendingBytes(numBytes);
@@ -138,25 +125,37 @@ class NettyServerStream extends AbstractServerStream {
     }
 
     @Override
+    public void writeFrame(WritableBuffer frame, boolean flush, final int numMessages) {
+      try (TaskCloseable ignore = PerfMark.traceTask("NettyServerStream$Sink.writeFrame")) {
+        writeFrameInternal(frame, flush, numMessages);
+      }
+    }
+
+    @Override
     public void writeTrailers(Metadata trailers, boolean headersSent, Status status) {
-      Http2Headers http2Trailers = Utils.convertTrailers(trailers, headersSent);
-      writeQueue.enqueue(
-          SendResponseHeadersCommand.createTrailers(transportState(), http2Trailers, status),
-          true);
+      try (TaskCloseable ignore = PerfMark.traceTask("NettyServerStream$Sink.writeTrailers")) {
+        Http2Headers http2Trailers = Utils.convertTrailers(trailers, headersSent);
+        writeQueue.enqueue(
+            SendResponseHeadersCommand.createTrailers(transportState(), http2Trailers, status),
+            true);
+      }
     }
 
     @Override
     public void cancel(Status status) {
-      writeQueue.enqueue(new CancelServerStreamCommand(transportState(), status), true);
+      try (TaskCloseable ignore = PerfMark.traceTask("NettyServerStream$Sink.cancel")) {
+        writeQueue.enqueue(new CancelServerStreamCommand(transportState(), status), true);
+      }
     }
   }
 
-  /** This should only called from the transport thread. */
+  /** This should only be called from the transport thread. */
   public static class TransportState extends AbstractServerStream.TransportState
       implements StreamIdHolder {
     private final Http2Stream http2Stream;
     private final NettyServerHandler handler;
     private final EventLoop eventLoop;
+    private final Tag tag;
 
     public TransportState(
         NettyServerHandler handler,
@@ -164,11 +163,13 @@ class NettyServerStream extends AbstractServerStream {
         Http2Stream http2Stream,
         int maxMessageSize,
         StatsTraceContext statsTraceCtx,
-        TransportTracer transportTracer) {
+        TransportTracer transportTracer,
+        String methodName) {
       super(maxMessageSize, statsTraceCtx, transportTracer);
       this.http2Stream = checkNotNull(http2Stream, "http2Stream");
       this.handler = checkNotNull(handler, "handler");
       this.eventLoop = eventLoop;
+      this.tag = PerfMark.createTag(methodName, http2Stream.id());
     }
 
     @Override
@@ -176,7 +177,18 @@ class NettyServerStream extends AbstractServerStream {
       if (eventLoop.inEventLoop()) {
         r.run();
       } else {
-        eventLoop.execute(r);
+        final Link link = PerfMark.linkOut();
+        eventLoop.execute(new Runnable() {
+          @Override
+          public void run() {
+            try (TaskCloseable ignore =
+                     PerfMark.traceTask("NettyServerStream$TransportState.runOnTransportThread")) {
+              PerfMark.attachTag(tag);
+              PerfMark.linkIn(link);
+              r.run();
+            }
+          }
+        });
       }
     }
 
@@ -202,5 +214,15 @@ class NettyServerStream extends AbstractServerStream {
     public int id() {
       return http2Stream.id();
     }
+
+    @Override
+    public Tag tag() {
+      return tag;
+    }
+  }
+
+  @Override
+  public int streamId() {
+    return streamId;
   }
 }

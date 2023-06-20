@@ -28,6 +28,7 @@ java_library_host {
         "src/main/java/io/grpc/auth/*.java",
     ],
     libs: [
+        "grpc-java-api",
         "grpc-java-core",
         "google-auth-library-credentials-0.13.0",
         "guava",

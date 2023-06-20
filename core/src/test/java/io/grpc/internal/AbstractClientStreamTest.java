@@ -25,8 +25,10 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.AdditionalAnswers.delegatesTo;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.same;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -34,8 +36,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import io.grpc.Attributes;
+import io.grpc.CallOptions;
 import io.grpc.Codec;
 import io.grpc.Deadline;
+import io.grpc.Grpc;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.Status.Code;
@@ -47,6 +51,7 @@ import io.grpc.internal.testing.TestClientStreamTracer;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.SocketAddress;
 import java.util.concurrent.TimeUnit;
 import org.junit.Before;
 import org.junit.Rule;
@@ -55,10 +60,11 @@ import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.mockito.stubbing.Answer;
 
 /**
@@ -68,16 +74,23 @@ import org.mockito.stubbing.Answer;
 @RunWith(JUnit4.class)
 public class AbstractClientStreamTest {
 
+  @Rule public final MockitoRule mocks = MockitoJUnit.rule();
+  @SuppressWarnings("deprecation") // https://github.com/grpc/grpc-java/issues/7467
   @Rule public final ExpectedException thrown = ExpectedException.none();
 
   private final StatsTraceContext statsTraceCtx = StatsTraceContext.NOOP;
   private final TransportTracer transportTracer = new TransportTracer();
+  private static final SocketAddress SERVER_ADDR = new SocketAddress() {
+      @Override
+      public String toString() {
+        return "fake_server_addr";
+      }
+    };
+
   @Mock private ClientStreamListener mockListener;
 
   @Before
   public void setUp() {
-    MockitoAnnotations.initMocks(this);
-
     doAnswer(new Answer<Void>() {
       @Override
       public Void answer(InvocationOnMock invocation) throws Throwable {
@@ -86,7 +99,7 @@ public class AbstractClientStreamTest {
         while (producer.next() != null) {}
         return null;
       }
-    }).when(mockListener).messagesAvailable(Matchers.<StreamListener.MessageProducer>any());
+    }).when(mockListener).messagesAvailable(ArgumentMatchers.<StreamListener.MessageProducer>any());
   }
 
   private final WritableBufferAllocator allocator = new WritableBufferAllocator() {
@@ -321,9 +334,8 @@ public class AbstractClientStreamTest {
     AbstractClientStream stream =
         new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
-    // The application will call request when waiting for a message, which will in turn call this
-    // on the transport thread.
-    stream.transportState().requestMessagesFromDeframer(1);
+    // The application will call request when waiting for a message
+    stream.request(1);
     // Send first byte of 2 byte message
     stream.transportState().deframe(ReadableBuffers.wrap(new byte[] {0, 0, 0, 0, 2, 1}));
     Status status = Status.INTERNAL.withDescription("rst___stream");
@@ -338,12 +350,30 @@ public class AbstractClientStreamTest {
   }
 
   @Test
+  public void statusOkFollowedByRstStreamNoError() {
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
+    stream.start(mockListener);
+    stream.transportState().deframe(ReadableBuffers.wrap(new byte[] {0, 0, 0, 0, 1, 1}));
+    stream.transportState().inboundTrailersReceived(new Metadata(), Status.OK);
+    Status status = Status.INTERNAL.withDescription("rst___stream");
+    // Simulate getting a reset
+    stream.transportState().transportReportStatus(status, false /*stop delivery*/, new Metadata());
+    stream.request(1);
+
+    ArgumentCaptor<Status> statusCaptor = ArgumentCaptor.forClass(Status.class);
+    verify(mockListener)
+        .closed(statusCaptor.capture(), any(RpcProgress.class), any(Metadata.class));
+    assertTrue(statusCaptor.getValue().isOk());
+  }
+
+  @Test
   public void trailerOkWithTruncatedMessage() {
     AbstractClientStream stream =
         new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
 
-    stream.transportState().requestMessagesFromDeframer(1);
+    stream.request(1);
     stream.transportState().deframe(ReadableBuffers.wrap(new byte[] {0, 0, 0, 0, 2, 1}));
     stream.transportState().inboundTrailersReceived(new Metadata(), Status.OK);
 
@@ -360,7 +390,7 @@ public class AbstractClientStreamTest {
         new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
 
-    stream.transportState().requestMessagesFromDeframer(1);
+    stream.request(1);
     stream.transportState().deframe(ReadableBuffers.wrap(new byte[] {0, 0, 0, 0, 2, 1}));
     stream.transportState().inboundTrailersReceived(
         new Metadata(), Status.DATA_LOSS.withDescription("data___loss"));
@@ -371,7 +401,7 @@ public class AbstractClientStreamTest {
     assertSame(Status.Code.DATA_LOSS, statusCaptor.getValue().getCode());
     assertEquals("data___loss", statusCaptor.getValue().getDescription());
   }
-  
+
   @Test
   public void getRequest() {
     AbstractClientStream.Sink sink = mock(AbstractClientStream.Sink.class);
@@ -395,8 +425,7 @@ public class AbstractClientStreamTest {
     assertTrue(payloadCaptor.getValue() != null);
     // GET requests don't have BODY.
     verify(sink, never())
-        .writeFrame(
-            any(WritableBuffer.class), any(Boolean.class), any(Boolean.class), any(Integer.class));
+        .writeFrame(any(WritableBuffer.class), anyBoolean(), anyBoolean(), anyInt());
     assertThat(tracer.nextOutboundEvent()).isEqualTo("outboundMessage(0)");
     assertThat(tracer.nextOutboundEvent()).matches("outboundMessageSent\\(0, [0-9]+, [0-9]+\\)");
     assertNull(tracer.nextOutboundEvent());
@@ -434,7 +463,7 @@ public class AbstractClientStreamTest {
     stream.start(mockListener);
 
     ArgumentCaptor<Metadata> headersCaptor = ArgumentCaptor.forClass(Metadata.class);
-    verify(sink).writeHeaders(headersCaptor.capture(), any(byte[].class));
+    verify(sink).writeHeaders(headersCaptor.capture(), ArgumentMatchers.<byte[]>any());
 
     Metadata headers = headersCaptor.getValue();
     assertTrue(headers.containsKey(GrpcUtil.TIMEOUT_KEY));
@@ -442,6 +471,15 @@ public class AbstractClientStreamTest {
         .isLessThan(TimeUnit.SECONDS.toNanos(1));
     assertThat(headers.get(GrpcUtil.TIMEOUT_KEY).longValue())
         .isGreaterThan(TimeUnit.MILLISECONDS.toNanos(600));
+  }
+
+  @Test
+  public void appendTimeoutInsight() {
+    InsightBuilder insight = new InsightBuilder();
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
+    stream.appendTimeoutInsight(insight);
+    assertThat(insight.toString()).isEqualTo("[remote_addr=fake_server_addr]");
   }
 
   /**
@@ -479,7 +517,7 @@ public class AbstractClientStreamTest {
         StatsTraceContext statsTraceCtx,
         TransportTracer transportTracer,
         boolean useGet) {
-      super(allocator, statsTraceCtx, transportTracer, new Metadata(), useGet);
+      super(allocator, statsTraceCtx, transportTracer, new Metadata(), CallOptions.DEFAULT, useGet);
       this.state = state;
       this.sink = sink;
     }
@@ -505,16 +543,13 @@ public class AbstractClientStreamTest {
 
     @Override
     public Attributes getAttributes() {
-      return Attributes.EMPTY;
+      return Attributes.newBuilder().set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, SERVER_ADDR).build();
     }
   }
 
   private static class BaseSink implements AbstractClientStream.Sink {
     @Override
     public void writeHeaders(Metadata headers, byte[] payload) {}
-
-    @Override
-    public void request(int numMessages) {}
 
     @Override
     public void writeFrame(
