@@ -29,11 +29,8 @@ import static org.mockito.Mockito.when;
 
 import com.google.common.collect.ImmutableList;
 import com.google.protobuf.ByteString;
-import io.grpc.alts.internal.Handshaker.HandshakeProtocol;
-import io.grpc.alts.internal.Handshaker.HandshakerReq;
-import io.grpc.alts.internal.Handshaker.Identity;
-import io.grpc.alts.internal.Handshaker.StartClientHandshakeReq;
-import io.grpc.alts.internal.TransportSecurityCommon.RpcProtocolVersions;
+import io.grpc.internal.TestUtils.NoopChannelLogger;
+import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
 import org.junit.Before;
@@ -41,7 +38,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 
 /** Unit tests for {@link AltsHandshakerClient}. */
 @RunWith(JUnit4.class)
@@ -64,12 +61,13 @@ public class AltsHandshakerClientTest {
             .setTargetName(TEST_TARGET_NAME)
             .setTargetServiceAccounts(ImmutableList.of(TEST_TARGET_SERVICE_ACCOUNT))
             .build();
-    handshaker = new AltsHandshakerClient(mockStub, clientOptions);
+    NoopChannelLogger channelLogger = new NoopChannelLogger();
+    handshaker = new AltsHandshakerClient(mockStub, clientOptions, channelLogger);
   }
 
   @Test
   public void startClientHandshakeFailure() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getErrorResponse());
 
     try {
@@ -82,7 +80,7 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void startClientHandshakeSuccess() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getOkResponse(0));
 
     ByteBuffer outFrame = handshaker.startClientHandshake();
@@ -95,7 +93,7 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void startClientHandshakeWithOptions() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getOkResponse(0));
 
     ByteBuffer outFrame = handshaker.startClientHandshake();
@@ -111,6 +109,7 @@ public class AltsHandshakerClientTest {
                     .setTargetName(TEST_TARGET_NAME)
                     .addTargetIdentities(
                         Identity.newBuilder().setServiceAccount(TEST_TARGET_SERVICE_ACCOUNT))
+                    .setMaxFrameSize(AltsTsiFrameProtector.getMaxFrameSize())
                     .build())
             .build();
     verify(mockStub).send(req);
@@ -118,7 +117,7 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void startServerHandshakeFailure() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getErrorResponse());
 
     try {
@@ -132,11 +131,27 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void startServerHandshakeSuccess() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getOkResponse(BYTES_CONSUMED));
 
     ByteBuffer inBytes = ByteBuffer.allocate(IN_BYTES_SIZE);
     ByteBuffer outFrame = handshaker.startServerHandshake(inBytes);
+
+    HandshakerReq req =
+        HandshakerReq.newBuilder()
+            .setServerStart(
+                StartServerHandshakeReq.newBuilder()
+                    .addApplicationProtocols(AltsHandshakerClient.getApplicationProtocol())
+                    .putHandshakeParameters(
+                      HandshakeProtocol.ALTS.getNumber(),
+                      ServerHandshakeParameters.newBuilder()
+                          .addRecordProtocols(AltsHandshakerClient.getRecordProtocol())
+                          .build())
+                    .setInBytes(ByteString.copyFrom(ByteBuffer.allocate(IN_BYTES_SIZE)))
+                    .setMaxFrameSize(AltsTsiFrameProtector.getMaxFrameSize())
+                    .build())
+            .build();
+    verify(mockStub).send(req);
 
     assertEquals(ByteString.copyFrom(outFrame), MockAltsHandshakerResp.getOutFrame());
     assertFalse(handshaker.isFinished());
@@ -147,7 +162,7 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void startServerHandshakeEmptyOutFrame() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getEmptyOutFrameResponse(BYTES_CONSUMED));
 
     ByteBuffer inBytes = ByteBuffer.allocate(IN_BYTES_SIZE);
@@ -162,11 +177,11 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void startServerHandshakeWithPrefixBuffer() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getOkResponse(BYTES_CONSUMED));
 
     ByteBuffer inBytes = ByteBuffer.allocate(IN_BYTES_SIZE);
-    inBytes.position(PREFIX_POSITION);
+    ((Buffer) inBytes).position(PREFIX_POSITION);
     ByteBuffer outFrame = handshaker.startServerHandshake(inBytes);
 
     assertEquals(ByteString.copyFrom(outFrame), MockAltsHandshakerResp.getOutFrame());
@@ -179,7 +194,7 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void nextFailure() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getErrorResponse());
 
     try {
@@ -193,7 +208,7 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void nextSuccess() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getOkResponse(BYTES_CONSUMED));
 
     ByteBuffer inBytes = ByteBuffer.allocate(IN_BYTES_SIZE);
@@ -208,7 +223,7 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void nextEmptyOutFrame() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getEmptyOutFrameResponse(BYTES_CONSUMED));
 
     ByteBuffer inBytes = ByteBuffer.allocate(IN_BYTES_SIZE);
@@ -223,7 +238,7 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void nextFinished() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getFinishedResponse(BYTES_CONSUMED));
 
     ByteBuffer inBytes = ByteBuffer.allocate(IN_BYTES_SIZE);
@@ -237,7 +252,7 @@ public class AltsHandshakerClientTest {
 
   @Test
   public void setRpcVersions() throws Exception {
-    when(mockStub.send(Matchers.<HandshakerReq>any()))
+    when(mockStub.send(ArgumentMatchers.<HandshakerReq>any()))
         .thenReturn(MockAltsHandshakerResp.getOkResponse(0));
 
     RpcProtocolVersions rpcVersions =
@@ -253,7 +268,8 @@ public class AltsHandshakerClientTest {
             .setTargetServiceAccounts(ImmutableList.of(TEST_TARGET_SERVICE_ACCOUNT))
             .setRpcProtocolVersions(rpcVersions)
             .build();
-    handshaker = new AltsHandshakerClient(mockStub, clientOptions);
+    NoopChannelLogger channelLogger = new NoopChannelLogger();
+    handshaker = new AltsHandshakerClient(mockStub, clientOptions, channelLogger);
 
     handshaker.startClientHandshake();
 
