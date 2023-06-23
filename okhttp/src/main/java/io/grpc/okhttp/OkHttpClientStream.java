@@ -22,6 +22,7 @@ import static io.grpc.internal.ClientStreamListener.RpcProgress.PROCESSED;
 
 import com.google.common.io.BaseEncoding;
 import io.grpc.Attributes;
+import io.grpc.CallOptions;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
@@ -32,9 +33,10 @@ import io.grpc.internal.TransportTracer;
 import io.grpc.internal.WritableBuffer;
 import io.grpc.okhttp.internal.framed.ErrorCode;
 import io.grpc.okhttp.internal.framed.Header;
-import java.util.ArrayDeque;
+import io.perfmark.PerfMark;
+import io.perfmark.Tag;
+import io.perfmark.TaskCloseable;
 import java.util.List;
-import java.util.Queue;
 import javax.annotation.concurrent.GuardedBy;
 import okio.Buffer;
 
@@ -42,8 +44,6 @@ import okio.Buffer;
  * Client stream for the okhttp transport.
  */
 class OkHttpClientStream extends AbstractClientStream {
-
-  private static final int WINDOW_UPDATE_THRESHOLD = Utils.DEFAULT_WINDOW_SIZE / 2;
 
   private static final Buffer EMPTY_BUFFER = new Buffer();
 
@@ -54,8 +54,6 @@ class OkHttpClientStream extends AbstractClientStream {
   private final String userAgent;
   private final StatsTraceContext statsTraceCtx;
   private String authority;
-  private Object outboundFlowState;
-  private volatile int id = ABSENT_ID;
   private final TransportState state;
   private final Sink sink = new Sink();
   private final Attributes attributes;
@@ -65,21 +63,25 @@ class OkHttpClientStream extends AbstractClientStream {
   OkHttpClientStream(
       MethodDescriptor<?, ?> method,
       Metadata headers,
-      AsyncFrameWriter frameWriter,
+      ExceptionHandlingFrameWriter frameWriter,
       OkHttpClientTransport transport,
       OutboundFlowController outboundFlow,
       Object lock,
       int maxMessageSize,
+      int initialWindowSize,
       String authority,
       String userAgent,
       StatsTraceContext statsTraceCtx,
-      TransportTracer transportTracer) {
+      TransportTracer transportTracer,
+      CallOptions callOptions,
+      boolean useGetForSafeMethods) {
     super(
         new OkHttpWritableBufferAllocator(),
         statsTraceCtx,
         transportTracer,
         headers,
-        method.isSafe());
+        callOptions,
+        useGetForSafeMethods && method.isSafe());
     this.statsTraceCtx = checkNotNull(statsTraceCtx, "statsTraceCtx");
     this.method = method;
     this.authority = authority;
@@ -88,8 +90,16 @@ class OkHttpClientStream extends AbstractClientStream {
     // so it is safe to read the transport attributes.
     // We make a copy here for convenience, even though we can ask the transport.
     this.attributes = transport.getAttributes();
-    this.state = new TransportState(maxMessageSize, statsTraceCtx, lock, frameWriter, outboundFlow,
-        transport);
+    this.state =
+        new TransportState(
+            maxMessageSize,
+            statsTraceCtx,
+            lock,
+            frameWriter,
+            outboundFlow,
+            transport,
+            initialWindowSize,
+            method.getFullMethodName());
   }
 
   @Override
@@ -107,10 +117,6 @@ class OkHttpClientStream extends AbstractClientStream {
    */
   public MethodDescriptor.MethodType getType() {
     return method.getType();
-  }
-
-  public int id() {
-    return id;
   }
 
   /**
@@ -132,115 +138,124 @@ class OkHttpClientStream extends AbstractClientStream {
   }
 
   class Sink implements AbstractClientStream.Sink {
-    @SuppressWarnings("BetaApi") // BaseEncoding is stable in Guava 20.0
     @Override
     public void writeHeaders(Metadata metadata, byte[] payload) {
-      String defaultPath = "/" + method.getFullMethodName();
-      if (payload != null) {
-        useGet = true;
-        defaultPath += "?" + BaseEncoding.base64().encode(payload);
-      }
-      synchronized (state.lock) {
-        state.streamReady(metadata, defaultPath);
+      try (TaskCloseable ignore = PerfMark.traceTask("OkHttpClientStream$Sink.writeHeaders")) {
+        String defaultPath = "/" + method.getFullMethodName();
+        if (payload != null) {
+          useGet = true;
+          defaultPath += "?" + BaseEncoding.base64().encode(payload);
+        }
+        synchronized (state.lock) {
+          state.streamReady(metadata, defaultPath);
+        }
       }
     }
 
     @Override
     public void writeFrame(
         WritableBuffer frame, boolean endOfStream, boolean flush, int numMessages) {
-      Buffer buffer;
-      if (frame == null) {
-        buffer = EMPTY_BUFFER;
-      } else {
-        buffer = ((OkHttpWritableBuffer) frame).buffer();
-        int size = (int) buffer.size();
-        if (size > 0) {
-          onSendingBytes(size);
+      try (TaskCloseable ignore = PerfMark.traceTask("OkHttpClientStream$Sink.writeFrame")) {
+        Buffer buffer;
+        if (frame == null) {
+          buffer = EMPTY_BUFFER;
+        } else {
+          buffer = ((OkHttpWritableBuffer) frame).buffer();
+          int size = (int) buffer.size();
+          if (size > 0) {
+            onSendingBytes(size);
+          }
         }
-      }
 
-      synchronized (state.lock) {
-        state.sendBuffer(buffer, endOfStream, flush);
-        getTransportTracer().reportMessageSent(numMessages);
-      }
-    }
-
-    @Override
-    public void request(final int numMessages) {
-      synchronized (state.lock) {
-        state.requestMessagesFromDeframer(numMessages);
+        synchronized (state.lock) {
+          state.sendBuffer(buffer, endOfStream, flush);
+          getTransportTracer().reportMessageSent(numMessages);
+        }
       }
     }
 
     @Override
     public void cancel(Status reason) {
-      synchronized (state.lock) {
-        state.cancel(reason, true, null);
+      try (TaskCloseable ignore = PerfMark.traceTask("OkHttpClientStream$Sink.cancel")) {
+        synchronized (state.lock) {
+          state.cancel(reason, true, null);
+        }
       }
     }
   }
 
-  class TransportState extends Http2ClientStreamTransportState {
+  class TransportState extends Http2ClientStreamTransportState
+      implements OutboundFlowController.Stream {
+    private final int initialWindowSize;
     private final Object lock;
     @GuardedBy("lock")
     private List<Header> requestHeaders;
-    /**
-     * Null iff {@link #requestHeaders} is null.  Non-null iff neither {@link #cancel} nor
-     * {@link #start(int)} have been called.
-     */
     @GuardedBy("lock")
-    private Queue<PendingData> pendingData = new ArrayDeque<PendingData>();
+    private Buffer pendingData = new Buffer();
+    private boolean pendingDataHasEndOfStream = false;
+    private boolean flushPendingData = false;
     @GuardedBy("lock")
     private boolean cancelSent = false;
     @GuardedBy("lock")
-    private int window = Utils.DEFAULT_WINDOW_SIZE;
+    private int window;
     @GuardedBy("lock")
-    private int processedWindow = Utils.DEFAULT_WINDOW_SIZE;
+    private int processedWindow;
     @GuardedBy("lock")
-    private final AsyncFrameWriter frameWriter;
+    private final ExceptionHandlingFrameWriter frameWriter;
     @GuardedBy("lock")
     private final OutboundFlowController outboundFlow;
     @GuardedBy("lock")
     private final OkHttpClientTransport transport;
+    /** True iff neither {@link #cancel} nor {@link #start(int)} have been called. */
+    @GuardedBy("lock")
+    private boolean canStart = true;
+    private final Tag tag;
+    @GuardedBy("lock")
+    private OutboundFlowController.StreamState outboundFlowState;
+    private int id = ABSENT_ID;
 
     public TransportState(
         int maxMessageSize,
         StatsTraceContext statsTraceCtx,
         Object lock,
-        AsyncFrameWriter frameWriter,
+        ExceptionHandlingFrameWriter frameWriter,
         OutboundFlowController outboundFlow,
-        OkHttpClientTransport transport) {
+        OkHttpClientTransport transport,
+        int initialWindowSize,
+        String methodName) {
       super(maxMessageSize, statsTraceCtx, OkHttpClientStream.this.getTransportTracer());
       this.lock = checkNotNull(lock, "lock");
       this.frameWriter = frameWriter;
       this.outboundFlow = outboundFlow;
       this.transport = transport;
+      this.window = initialWindowSize;
+      this.processedWindow = initialWindowSize;
+      this.initialWindowSize = initialWindowSize;
+      tag = PerfMark.createTag(methodName);
     }
 
+    @SuppressWarnings("GuardedBy")
     @GuardedBy("lock")
     public void start(int streamId) {
       checkState(id == ABSENT_ID, "the stream has been started with id %s", streamId);
       id = streamId;
+      outboundFlowState = outboundFlow.createState(this, streamId);
+      // TODO(b/145386688): This access should be guarded by 'OkHttpClientStream.this.state.lock';
+      // instead found: 'this.lock'
       state.onStreamAllocated();
 
-      if (pendingData != null) {
+      if (canStart) {
         // Only happens when the stream has neither been started nor cancelled.
         frameWriter.synStream(useGet, false, id, 0, requestHeaders);
         statsTraceCtx.clientOutboundHeaders();
         requestHeaders = null;
 
-        boolean flush = false;
-        while (!pendingData.isEmpty()) {
-          PendingData data = pendingData.poll();
-          outboundFlow.data(data.endOfStream, id, data.buffer, false);
-          if (data.flush) {
-            flush = true;
-          }
+        if (pendingData.size() > 0) {
+          outboundFlow.data(
+              pendingDataHasEndOfStream, outboundFlowState, pendingData, flushPendingData);
+
         }
-        if (flush) {
-          outboundFlow.flush();
-        }
-        pendingData = null;
+        canStart = false;
       }
     }
 
@@ -267,8 +282,8 @@ class OkHttpClientStream extends AbstractClientStream {
     @GuardedBy("lock")
     public void bytesRead(int processedBytes) {
       processedWindow -= processedBytes;
-      if (processedWindow <= WINDOW_UPDATE_THRESHOLD) {
-        int delta = Utils.DEFAULT_WINDOW_SIZE - processedWindow;
+      if (processedWindow <= initialWindowSize * Utils.DEFAULT_WINDOW_UPDATE_RATIO) {
+        int delta = initialWindowSize - processedWindow;
         window += delta;
         processedWindow += delta;
         frameWriter.windowUpdate(id(), delta);
@@ -334,21 +349,22 @@ class OkHttpClientStream extends AbstractClientStream {
       }
     }
 
+    @SuppressWarnings("GuardedBy")
     @GuardedBy("lock")
     private void cancel(Status reason, boolean stopDelivery, Metadata trailers) {
       if (cancelSent) {
         return;
       }
       cancelSent = true;
-      if (pendingData != null) {
+      if (canStart) {
         // stream is pending.
+        // TODO(b/145386688): This access should be guarded by 'this.transport.lock'; instead found:
+        // 'this.lock'
         transport.removePendingStream(OkHttpClientStream.this);
         // release holding data, so they can be GCed or returned to pool earlier.
         requestHeaders = null;
-        for (PendingData data : pendingData) {
-          data.buffer.clear();
-        }
-        pendingData = null;
+        pendingData.clear();
+        canStart = false;
         transportReportStatus(reason, true, trailers != null ? trailers : new Metadata());
       } else {
         // If pendingData is null, start must have already been called, which means synStream has
@@ -363,41 +379,48 @@ class OkHttpClientStream extends AbstractClientStream {
       if (cancelSent) {
         return;
       }
-      if (pendingData != null) {
+      if (canStart) {
         // Stream is pending start, queue the data.
-        pendingData.add(new PendingData(buffer, endOfStream, flush));
+        int dataSize = (int) buffer.size();
+        pendingData.write(buffer, dataSize);
+        pendingDataHasEndOfStream |= endOfStream;
+        flushPendingData |= flush;
       } else {
         checkState(id() != ABSENT_ID, "streamId should be set");
         // If buffer > frameWriter.maxDataLength() the flow-controller will ensure that it is
         // properly chunked.
-        outboundFlow.data(endOfStream, id(), buffer, flush);
+        outboundFlow.data(endOfStream, outboundFlowState, buffer, flush);
       }
     }
 
+    @SuppressWarnings("GuardedBy")
     @GuardedBy("lock")
     private void streamReady(Metadata metadata, String path) {
-      requestHeaders = Headers.createRequestHeaders(metadata, path, authority, userAgent, useGet);
+      requestHeaders =
+          Headers.createRequestHeaders(
+              metadata,
+              path,
+              authority,
+              userAgent,
+              useGet,
+              transport.isUsingPlaintext());
+      // TODO(b/145386688): This access should be guarded by 'this.transport.lock'; instead found:
+      // 'this.lock'
       transport.streamReadyToStart(OkHttpClientStream.this);
     }
-  }
 
-  void setOutboundFlowState(Object outboundFlowState) {
-    this.outboundFlowState = outboundFlowState;
-  }
+    Tag tag() {
+      return tag;
+    }
 
-  Object getOutboundFlowState() {
-    return outboundFlowState;
-  }
+    int id() {
+      return id;
+    }
 
-  private static class PendingData {
-    Buffer buffer;
-    boolean endOfStream;
-    boolean flush;
-
-    PendingData(Buffer buffer, boolean endOfStream, boolean flush) {
-      this.buffer = buffer;
-      this.endOfStream = endOfStream;
-      this.flush = flush;
+    OutboundFlowController.StreamState getOutboundFlowState() {
+      synchronized (lock) {
+        return outboundFlowState;
+      }
     }
   }
 }

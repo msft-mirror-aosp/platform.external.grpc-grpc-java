@@ -17,15 +17,19 @@
 package io.grpc.netty;
 
 import static io.grpc.internal.GrpcUtil.KEEPALIVE_TIME_NANOS_DISABLED;
+import static io.netty.channel.ChannelOption.ALLOCATOR;
 import static io.netty.channel.ChannelOption.SO_KEEPALIVE;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Ticker;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import io.grpc.Attributes;
 import io.grpc.CallOptions;
+import io.grpc.ChannelLogger;
+import io.grpc.ClientStreamTracer;
 import io.grpc.InternalChannelz.SocketStats;
 import io.grpc.InternalLogId;
 import io.grpc.Metadata;
@@ -43,12 +47,13 @@ import io.grpc.internal.TransportTracer;
 import io.grpc.netty.NettyChannelBuilder.LocalSocketPicker;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http2.StreamBufferingEncoder.Http2ChannelClosedException;
 import io.netty.util.AsciiString;
 import io.netty.util.concurrent.Future;
@@ -57,21 +62,24 @@ import java.net.SocketAddress;
 import java.nio.channels.ClosedChannelException;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 
 /**
  * A Netty-based {@link ConnectionClientTransport} implementation.
  */
 class NettyClientTransport implements ConnectionClientTransport {
-  private final InternalLogId logId = InternalLogId.allocate(getClass().getName());
+
+  private final InternalLogId logId;
   private final Map<ChannelOption<?>, ?> channelOptions;
   private final SocketAddress remoteAddress;
-  private final Class<? extends Channel> channelType;
+  private final ChannelFactory<? extends Channel> channelFactory;
   private final EventLoopGroup group;
   private final ProtocolNegotiator negotiator;
   private final String authorityString;
   private final AsciiString authority;
   private final AsciiString userAgent;
+  private final boolean autoFlowControl;
   private final int flowControlWindow;
   private final int maxMessageSize;
   private final int maxHeaderListSize;
@@ -79,8 +87,8 @@ class NettyClientTransport implements ConnectionClientTransport {
   private final long keepAliveTimeNanos;
   private final long keepAliveTimeoutNanos;
   private final boolean keepAliveWithoutCalls;
+  private final AsciiString negotiationScheme;
   private final Runnable tooManyPingsRunnable;
-  private ProtocolNegotiator.Handler negotiationHandler;
   private NettyClientHandler handler;
   // We should not send on the channel until negotiation completes. This is a hard requirement
   // by SslHandler but is appropriate for HTTP/1.1 Upgrade as well.
@@ -93,20 +101,28 @@ class NettyClientTransport implements ConnectionClientTransport {
   private final TransportTracer transportTracer;
   private final Attributes eagAttributes;
   private final LocalSocketPicker localSocketPicker;
+  private final ChannelLogger channelLogger;
+  private final boolean useGetForSafeMethods;
+  private final Ticker ticker;
 
   NettyClientTransport(
-      SocketAddress address, Class<? extends Channel> channelType,
+      SocketAddress address, ChannelFactory<? extends Channel> channelFactory,
       Map<ChannelOption<?>, ?> channelOptions, EventLoopGroup group,
-      ProtocolNegotiator negotiator, int flowControlWindow, int maxMessageSize,
-      int maxHeaderListSize, long keepAliveTimeNanos, long keepAliveTimeoutNanos,
+      ProtocolNegotiator negotiator, boolean autoFlowControl, int flowControlWindow,
+      int maxMessageSize, int maxHeaderListSize,
+      long keepAliveTimeNanos, long keepAliveTimeoutNanos,
       boolean keepAliveWithoutCalls, String authority, @Nullable String userAgent,
       Runnable tooManyPingsRunnable, TransportTracer transportTracer, Attributes eagAttributes,
-      LocalSocketPicker localSocketPicker) {
+      LocalSocketPicker localSocketPicker, ChannelLogger channelLogger,
+      boolean useGetForSafeMethods, Ticker ticker) {
+
     this.negotiator = Preconditions.checkNotNull(negotiator, "negotiator");
+    this.negotiationScheme = this.negotiator.scheme();
     this.remoteAddress = Preconditions.checkNotNull(address, "address");
     this.group = Preconditions.checkNotNull(group, "group");
-    this.channelType = Preconditions.checkNotNull(channelType, "channelType");
+    this.channelFactory = channelFactory;
     this.channelOptions = Preconditions.checkNotNull(channelOptions, "channelOptions");
+    this.autoFlowControl = autoFlowControl;
     this.flowControlWindow = flowControlWindow;
     this.maxMessageSize = maxMessageSize;
     this.maxHeaderListSize = maxHeaderListSize;
@@ -121,6 +137,10 @@ class NettyClientTransport implements ConnectionClientTransport {
     this.transportTracer = Preconditions.checkNotNull(transportTracer, "transportTracer");
     this.eagAttributes = Preconditions.checkNotNull(eagAttributes, "eagAttributes");
     this.localSocketPicker = Preconditions.checkNotNull(localSocketPicker, "localSocketPicker");
+    this.logId = InternalLogId.allocate(getClass(), remoteAddress.toString());
+    this.channelLogger = Preconditions.checkNotNull(channelLogger, "channelLogger");
+    this.useGetForSafeMethods = useGetForSafeMethods;
+    this.ticker = Preconditions.checkNotNull(ticker, "ticker");
   }
 
   @Override
@@ -152,20 +172,23 @@ class NettyClientTransport implements ConnectionClientTransport {
 
   @Override
   public ClientStream newStream(
-      MethodDescriptor<?, ?> method, Metadata headers, CallOptions callOptions) {
+      MethodDescriptor<?, ?> method, Metadata headers, CallOptions callOptions,
+      ClientStreamTracer[] tracers) {
     Preconditions.checkNotNull(method, "method");
     Preconditions.checkNotNull(headers, "headers");
     if (channel == null) {
-      return new FailingClientStream(statusExplainingWhyTheChannelIsNull);
+      return new FailingClientStream(statusExplainingWhyTheChannelIsNull, tracers);
     }
-    StatsTraceContext statsTraceCtx = StatsTraceContext.newClientContext(callOptions, headers);
+    StatsTraceContext statsTraceCtx =
+        StatsTraceContext.newClientContext(tracers, getAttributes(), headers);
     return new NettyClientStream(
         new NettyClientStream.TransportState(
             handler,
             channel.eventLoop(),
             maxMessageSize,
             statsTraceCtx,
-            transportTracer) {
+            transportTracer,
+            method.getFullMethodName()) {
           @Override
           protected Status statusFromFailedFuture(ChannelFuture f) {
             return NettyClientTransport.this.statusFromFailedFuture(f);
@@ -175,10 +198,12 @@ class NettyClientTransport implements ConnectionClientTransport {
         headers,
         channel,
         authority,
-        negotiationHandler.scheme(),
+        negotiationScheme,
         userAgent,
         statsTraceCtx,
-        transportTracer);
+        transportTracer,
+        callOptions,
+        useGetForSafeMethods);
   }
 
   @SuppressWarnings("unchecked")
@@ -196,22 +221,31 @@ class NettyClientTransport implements ConnectionClientTransport {
     handler = NettyClientHandler.newHandler(
         lifecycleManager,
         keepAliveManager,
+        autoFlowControl,
         flowControlWindow,
         maxHeaderListSize,
         GrpcUtil.STOPWATCH_SUPPLIER,
         tooManyPingsRunnable,
         transportTracer,
         eagAttributes,
-        authorityString);
-    NettyHandlerSettings.setAutoWindow(handler);
+        authorityString,
+        channelLogger,
+        ticker);
 
-    negotiationHandler = negotiator.newHandler(handler);
+    ChannelHandler negotiationHandler = negotiator.newHandler(handler);
 
     Bootstrap b = new Bootstrap();
+    b.option(ALLOCATOR, Utils.getByteBufAllocator(false));
     b.group(eventLoop);
-    b.channel(channelType);
-    if (NioSocketChannel.class.isAssignableFrom(channelType)) {
-      b.option(SO_KEEPALIVE, true);
+    b.channelFactory(channelFactory);
+    // For non-socket based channel, the option will be ignored.
+    b.option(SO_KEEPALIVE, true);
+    // For non-epoll based channel, the option will be ignored.
+    if (keepAliveTimeNanos != KEEPALIVE_TIME_NANOS_DISABLED) {
+      ChannelOption<Integer> tcpUserTimeout = Utils.maybeGetTcpUserTimeoutOption();
+      if (tcpUserTimeout != null) {
+        b.option(tcpUserTimeout, (int) TimeUnit.NANOSECONDS.toMillis(keepAliveTimeoutNanos));
+      }
     }
     for (Map.Entry<ChannelOption<?>, ?> entry : channelOptions.entrySet()) {
       // Every entry in the map is obtained from
@@ -220,12 +254,14 @@ class NettyClientTransport implements ConnectionClientTransport {
       b.option((ChannelOption<Object>) entry.getKey(), entry.getValue());
     }
 
-    /**
+    ChannelHandler bufferingHandler = new WriteBufferingAndExceptionHandler(negotiationHandler);
+
+    /*
      * We don't use a ChannelInitializer in the client bootstrap because its "initChannel" method
      * is executed in the event loop and we need this handler to be in the pipeline immediately so
      * that it may begin buffering writes.
      */
-    b.handler(negotiationHandler);
+    b.handler(bufferingHandler);
     ChannelFuture regFuture = b.register();
     if (regFuture.isDone() && !regFuture.isSuccess()) {
       channel = null;
@@ -302,9 +338,6 @@ class NettyClientTransport implements ConnectionClientTransport {
         @Override
         public void run() {
           lifecycleManager.notifyShutdown(reason);
-          // Call close() directly since negotiation may not have completed, such that a write would
-          // be queued.
-          channel.close();
           channel.write(new ForcefulCloseCommand(reason));
         }
       }, true);

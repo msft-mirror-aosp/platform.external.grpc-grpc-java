@@ -19,18 +19,22 @@ package io.grpc.internal;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.mockito.AdditionalAnswers.delegatesTo;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Matchers.same;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.google.common.util.concurrent.SettableFuture;
 import io.grpc.InternalStatus;
 import io.grpc.Metadata;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.internal.AbstractServerStream.TransportState;
 import io.grpc.internal.MessageFramerTest.ByteWritableBuffer;
 import java.io.ByteArrayInputStream;
@@ -55,6 +59,7 @@ public class AbstractServerStreamTest {
   private static final int TIMEOUT_MS = 1000;
   private static final int MAX_MESSAGE_SIZE = 100;
 
+  @SuppressWarnings("deprecation") // https://github.com/grpc/grpc-java/issues/7467
   @Rule public final ExpectedException thrown = ExpectedException.none();
 
   private final WritableBufferAllocator allocator = new WritableBufferAllocator() {
@@ -83,7 +88,7 @@ public class AbstractServerStreamTest {
    */
   @Test
   public void frameShouldBeIgnoredAfterDeframerClosed() {
-    final Queue<InputStream> streamListenerMessageQueue = new LinkedList<InputStream>();
+    final Queue<InputStream> streamListenerMessageQueue = new LinkedList<>();
     stream.transportState().setListener(new ServerStreamListenerBase() {
       @Override
       public void messagesAvailable(MessageProducer producer) {
@@ -103,6 +108,43 @@ public class AbstractServerStreamTest {
 
     verify(buffer).close();
     assertNull("no message expected", streamListenerMessageQueue.poll());
+  }
+
+  @Test
+  public void noHalfCloseListenerOnCancellation() throws Exception {
+    final Queue<InputStream> streamListenerMessageQueue = new LinkedList<>();
+    final SettableFuture<Status> closedFuture = SettableFuture.create();
+
+    stream.transportState().setListener(new ServerStreamListenerBase() {
+      @Override
+      public void messagesAvailable(StreamListener.MessageProducer producer) {
+        InputStream message;
+        while ((message = producer.next()) != null) {
+          streamListenerMessageQueue.add(message);
+        }
+      }
+
+      @Override
+      public void halfClosed() {
+        if (streamListenerMessageQueue.isEmpty()) {
+          throw new StatusRuntimeException(Status.INTERNAL.withDescription(
+              "Half close without request"));
+        }
+      }
+
+      @Override
+      public void closed(Status status) {
+        closedFuture.set(status);
+      }
+    });
+
+    ReadableBuffer buffer = mock(ReadableBuffer.class);
+    when(buffer.readableBytes()).thenReturn(1);
+    stream.transportState().inboundDataReceived(buffer, true);
+    Status cancel = Status.CANCELLED.withDescription("DEADLINE EXCEEDED");
+    stream.transportState().transportReportStatus(cancel);
+    assertEquals(cancel, closedFuture.get(TIMEOUT_MS, TimeUnit.MILLISECONDS));
+    verify(buffer).close();
   }
 
   @Test
@@ -161,7 +203,7 @@ public class AbstractServerStreamTest {
 
     // Queue a partial message in the deframer
     stream.transportState().inboundDataReceived(ReadableBuffers.wrap(new byte[] {1}), true);
-    stream.transportState().requestMessagesFromDeframer(1);
+    stream.request(1);
 
     Status status = closedFuture.get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
     assertEquals(Status.INTERNAL.getCode(), status.getCode());
@@ -270,8 +312,7 @@ public class AbstractServerStreamTest {
 
     stream.writeMessage(new ByteArrayInputStream(new byte[]{}));
 
-    verify(sink, never())
-        .writeFrame(any(WritableBuffer.class), any(Boolean.class), any(Integer.class));
+    verify(sink, never()).writeFrame(any(WritableBuffer.class), anyBoolean(), anyInt());
   }
 
   @Test
@@ -392,6 +433,11 @@ public class AbstractServerStreamTest {
       public void runOnTransportThread(Runnable r) {
         r.run();
       }
+    }
+
+    @Override
+    public int streamId() {
+      return -1;
     }
   }
 }

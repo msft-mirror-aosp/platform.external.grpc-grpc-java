@@ -17,32 +17,14 @@
 package io.grpc.alts;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
-import io.grpc.CallOptions;
-import io.grpc.Channel;
-import io.grpc.ClientCall;
-import io.grpc.ClientInterceptor;
 import io.grpc.ExperimentalApi;
 import io.grpc.ForwardingChannelBuilder;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
-import io.grpc.MethodDescriptor;
-import io.grpc.Status;
-import io.grpc.alts.internal.AltsClientOptions;
-import io.grpc.alts.internal.AltsProtocolNegotiator;
-import io.grpc.alts.internal.AltsTsiHandshaker;
-import io.grpc.alts.internal.HandshakerServiceGrpc;
-import io.grpc.alts.internal.RpcProtocolVersionsUtil;
-import io.grpc.alts.internal.TsiHandshaker;
-import io.grpc.alts.internal.TsiHandshakerFactory;
 import io.grpc.internal.GrpcUtil;
-import io.grpc.internal.ObjectPool;
-import io.grpc.internal.SharedResourcePool;
 import io.grpc.netty.InternalNettyChannelBuilder;
+import io.grpc.netty.InternalProtocolNegotiator.ProtocolNegotiator;
 import io.grpc.netty.NettyChannelBuilder;
-import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import javax.annotation.Nullable;
 
 /**
@@ -51,16 +33,9 @@ import javax.annotation.Nullable;
  */
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/4151")
 public final class AltsChannelBuilder extends ForwardingChannelBuilder<AltsChannelBuilder> {
-
-  private static final Logger logger = Logger.getLogger(AltsChannelBuilder.class.getName());
   private final NettyChannelBuilder delegate;
-  private final ImmutableList.Builder<String> targetServiceAccountsBuilder =
-      ImmutableList.builder();
-  private ObjectPool<ManagedChannel> handshakerChannelPool =
-      SharedResourcePool.forResource(HandshakerServiceChannel.SHARED_HANDSHAKER_CHANNEL);
-  private boolean enableUntrustedAlts;
-
-  private AltsProtocolNegotiator negotiatorForTest;
+  private final AltsChannelCredentials.Builder credentialsBuilder =
+      new AltsChannelCredentials.Builder();
 
   /** "Overrides" the static method in {@link ManagedChannelBuilder}. */
   public static final AltsChannelBuilder forTarget(String target) {
@@ -73,13 +48,7 @@ public final class AltsChannelBuilder extends ForwardingChannelBuilder<AltsChann
   }
 
   private AltsChannelBuilder(String target) {
-    delegate =
-        NettyChannelBuilder.forTarget(target)
-            .keepAliveTime(20, TimeUnit.SECONDS)
-            .keepAliveTimeout(10, TimeUnit.SECONDS)
-            .keepAliveWithoutCalls(true);
-    InternalNettyChannelBuilder.setProtocolNegotiatorFactory(
-        delegate(), new ProtocolNegotiatorFactory());
+    delegate = NettyChannelBuilder.forTarget(target);
   }
 
   /**
@@ -87,7 +56,7 @@ public final class AltsChannelBuilder extends ForwardingChannelBuilder<AltsChann
    * service account in the handshaker result. Otherwise, the handshake fails.
    */
   public AltsChannelBuilder addTargetServiceAccount(String targetServiceAccount) {
-    targetServiceAccountsBuilder.add(targetServiceAccount);
+    credentialsBuilder.addTargetServiceAccount(targetServiceAccount);
     return this;
   }
 
@@ -96,16 +65,13 @@ public final class AltsChannelBuilder extends ForwardingChannelBuilder<AltsChann
    * is running on Google Cloud Platform.
    */
   public AltsChannelBuilder enableUntrustedAltsForTesting() {
-    enableUntrustedAlts = true;
+    credentialsBuilder.enableUntrustedAltsForTesting();
     return this;
   }
 
   /** Sets a new handshaker service address for testing. */
   public AltsChannelBuilder setHandshakerAddressForTesting(String handshakerAddress) {
-    // Instead of using the default shared channel to the handshaker service, create a fix object
-    // pool of handshaker service channel for testing.
-    handshakerChannelPool =
-        HandshakerServiceChannel.getHandshakerChannelPoolForTesting(handshakerAddress);
+    credentialsBuilder.setHandshakerAddressForTesting(handshakerAddress);
     return this;
   }
 
@@ -116,70 +82,16 @@ public final class AltsChannelBuilder extends ForwardingChannelBuilder<AltsChann
 
   @Override
   public ManagedChannel build() {
-    if (!CheckGcpEnvironment.isOnGcp()) {
-      if (enableUntrustedAlts) {
-        logger.log(
-            Level.WARNING,
-            "Untrusted ALTS mode is enabled and we cannot guarantee the trustworthiness of the "
-                + "ALTS handshaker service");
-      } else {
-        Status status =
-            Status.INTERNAL.withDescription("ALTS is only allowed to run on Google Cloud Platform");
-        delegate().intercept(new FailingClientInterceptor(status));
-      }
-    }
+    InternalNettyChannelBuilder.setProtocolNegotiatorFactory(
+        delegate(),
+        credentialsBuilder.buildProtocolNegotiatorFactory());
 
     return delegate().build();
   }
 
   @VisibleForTesting
   @Nullable
-  AltsProtocolNegotiator getProtocolNegotiatorForTest() {
-    return negotiatorForTest;
-  }
-
-  private final class ProtocolNegotiatorFactory
-      implements InternalNettyChannelBuilder.ProtocolNegotiatorFactory {
-
-    @Override
-    public AltsProtocolNegotiator buildProtocolNegotiator() {
-      final ImmutableList<String> targetServiceAccounts = targetServiceAccountsBuilder.build();
-      TsiHandshakerFactory altsHandshakerFactory =
-          new TsiHandshakerFactory() {
-            @Override
-            public TsiHandshaker newHandshaker(String authority) {
-              // Used the shared grpc channel to connecting to the ALTS handshaker service.
-              // TODO: Release the channel if it is not used.
-              // https://github.com/grpc/grpc-java/issues/4755.
-              AltsClientOptions handshakerOptions =
-                  new AltsClientOptions.Builder()
-                      .setRpcProtocolVersions(RpcProtocolVersionsUtil.getRpcProtocolVersions())
-                      .setTargetServiceAccounts(targetServiceAccounts)
-                      .setTargetName(authority)
-                      .build();
-              return AltsTsiHandshaker.newClient(
-                  HandshakerServiceGrpc.newStub(handshakerChannelPool.getObject()),
-                  handshakerOptions);
-            }
-          };
-      return negotiatorForTest =
-          AltsProtocolNegotiator.createClientNegotiator(altsHandshakerFactory);
-    }
-  }
-
-  /** An implementation of {@link ClientInterceptor} that fails each call. */
-  static final class FailingClientInterceptor implements ClientInterceptor {
-
-    private final Status status;
-
-    public FailingClientInterceptor(Status status) {
-      this.status = status;
-    }
-
-    @Override
-    public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
-        MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, Channel next) {
-      return new FailingClientCall<>(status);
-    }
+  ProtocolNegotiator getProtocolNegotiatorForTest() {
+    return credentialsBuilder.buildProtocolNegotiatorFactory().newNegotiator();
   }
 }

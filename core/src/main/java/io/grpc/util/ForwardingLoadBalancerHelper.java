@@ -17,16 +17,22 @@
 package io.grpc.util;
 
 import com.google.common.base.MoreObjects;
-import io.grpc.Attributes;
+import io.grpc.ChannelCredentials;
+import io.grpc.ChannelLogger;
 import io.grpc.ConnectivityState;
 import io.grpc.EquivalentAddressGroup;
 import io.grpc.ExperimentalApi;
+import io.grpc.LoadBalancer;
+import io.grpc.LoadBalancer.CreateSubchannelArgs;
 import io.grpc.LoadBalancer.Subchannel;
 import io.grpc.LoadBalancer.SubchannelPicker;
-import io.grpc.LoadBalancer;
 import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 import io.grpc.NameResolver;
+import io.grpc.NameResolverRegistry;
+import io.grpc.SynchronizationContext;
 import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
 
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1771")
 public abstract class ForwardingLoadBalancerHelper extends LoadBalancer.Helper {
@@ -36,29 +42,17 @@ public abstract class ForwardingLoadBalancerHelper extends LoadBalancer.Helper {
   protected abstract LoadBalancer.Helper delegate();
 
   @Override
-  public Subchannel createSubchannel(EquivalentAddressGroup addrs, Attributes attrs) {
-    return delegate().createSubchannel(addrs, attrs);
-  }
-
-  @Override
-  public Subchannel createSubchannel(List<EquivalentAddressGroup> addrs, Attributes attrs) {
-    return delegate().createSubchannel(addrs, attrs);
-  }
-
-  @Override
-  public void updateSubchannelAddresses(
-      Subchannel subchannel, EquivalentAddressGroup addrs) {
-    delegate().updateSubchannelAddresses(subchannel, addrs);
-  }
-
-  @Override
-  public void updateSubchannelAddresses(
-      Subchannel subchannel, List<EquivalentAddressGroup> addrs) {
-    delegate().updateSubchannelAddresses(subchannel, addrs);
+  public Subchannel createSubchannel(CreateSubchannelArgs args) {
+    return delegate().createSubchannel(args);
   }
 
   @Override
   public  ManagedChannel createOobChannel(EquivalentAddressGroup eag, String authority) {
+    return delegate().createOobChannel(eag, authority);
+  }
+
+  @Override
+  public  ManagedChannel createOobChannel(List<EquivalentAddressGroup> eag, String authority) {
     return delegate().createOobChannel(eag, authority);
   }
 
@@ -68,24 +62,82 @@ public abstract class ForwardingLoadBalancerHelper extends LoadBalancer.Helper {
   }
 
   @Override
+  public void updateOobChannelAddresses(ManagedChannel channel, List<EquivalentAddressGroup> eag) {
+    delegate().updateOobChannelAddresses(channel, eag);
+  }
+
+  @Deprecated
+  @Override
+  public ManagedChannelBuilder<?> createResolvingOobChannelBuilder(String target) {
+    return delegate().createResolvingOobChannelBuilder(target);
+  }
+
+  @Override
+  public ManagedChannelBuilder<?> createResolvingOobChannelBuilder(
+      String target, ChannelCredentials creds) {
+    return delegate().createResolvingOobChannelBuilder(target, creds);
+  }
+
+  @Override
+  public ManagedChannel createResolvingOobChannel(String target) {
+    return delegate().createResolvingOobChannel(target);
+  }
+
+  @Override
   public void updateBalancingState(
       ConnectivityState newState, SubchannelPicker newPicker) {
     delegate().updateBalancingState(newState, newPicker);
   }
 
   @Override
-  public void runSerialized(Runnable task) {
-    delegate().runSerialized(task);
+  public void refreshNameResolution() {
+    delegate().refreshNameResolution();
   }
 
   @Override
-  public NameResolver.Factory getNameResolverFactory() {
-    return delegate().getNameResolverFactory();
+  @Deprecated
+  public void ignoreRefreshNameResolutionCheck() {
+    delegate().ignoreRefreshNameResolutionCheck();
   }
 
   @Override
   public String getAuthority() {
     return delegate().getAuthority();
+  }
+
+  @Override
+  public ChannelCredentials getChannelCredentials() {
+    return delegate().getChannelCredentials();
+  }
+
+  @Override
+  public ChannelCredentials getUnsafeChannelCredentials() {
+    return delegate().getUnsafeChannelCredentials();
+  }
+
+  @Override
+  public SynchronizationContext getSynchronizationContext() {
+    return delegate().getSynchronizationContext();
+  }
+
+  @Override
+  public ScheduledExecutorService getScheduledExecutorService() {
+    return delegate().getScheduledExecutorService();
+  }
+
+  @Override
+  public ChannelLogger getChannelLogger() {
+    return delegate().getChannelLogger();
+  }
+
+  @Override
+  public NameResolver.Args getNameResolverArgs() {
+    return delegate().getNameResolverArgs();
+  }
+
+  @Override
+  public NameResolverRegistry getNameResolverRegistry() {
+    return delegate().getNameResolverRegistry();
   }
 
   @Override

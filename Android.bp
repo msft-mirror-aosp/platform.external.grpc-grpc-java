@@ -55,6 +55,7 @@ java_library_host {
 java_library {
     name: "grpc-java-lite",
     static_libs: [
+        "grpc-java-api",
         "grpc-java-context",
         "grpc-java-core",
         "grpc-java-core-inprocess",
@@ -91,6 +92,8 @@ java_library {
         "android/src/main/java/io/grpc/android/*.java",
     ],
     libs: [
+        "error_prone_annotations",
+        "grpc-java-annotation-stubs",
         "grpc-java-core",
         "grpc-java-core-internal",
         "jsr305",
@@ -99,6 +102,7 @@ java_library {
     sdk_version: "current",
     min_sdk_version: "30",
     apex_available: [
+        "//apex_available:platform",
         "com.android.adservices",
         "com.android.devicelock",
         "com.android.extservices",
