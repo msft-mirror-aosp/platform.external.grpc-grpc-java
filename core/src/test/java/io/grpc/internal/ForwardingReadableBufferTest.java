@@ -28,34 +28,31 @@ import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
-/**
- * Tests for {@link ForwardingReadableBuffer}.
- */
+/** Tests for {@link ForwardingReadableBuffer}. */
 @RunWith(JUnit4.class)
 public class ForwardingReadableBufferTest {
+  @Rule public final MockitoRule mocks = MockitoJUnit.rule();
 
   @Mock private ReadableBuffer delegate;
   private ForwardingReadableBuffer buffer;
 
   @Before
   public void setUp() {
-    MockitoAnnotations.initMocks(this);
     buffer = new ForwardingReadableBuffer(delegate) {};
   }
 
   @Test
   public void allMethodsForwarded() throws Exception {
     ForwardingTestUtil.testMethodsForwarded(
-        ReadableBuffer.class,
-        delegate,
-        buffer,
-        Collections.<Method>emptyList());
+        ReadableBuffer.class, delegate, buffer, Collections.<Method>emptyList());
   }
 
   @Test
@@ -96,7 +93,7 @@ public class ForwardingReadableBufferTest {
 
   @Test
   public void readBytes_overload1() {
-    ByteBuffer dest = mock(ByteBuffer.class);
+    ByteBuffer dest = ByteBuffer.allocate(0);
     buffer.readBytes(dest);
 
     verify(delegate).readBytes(dest);

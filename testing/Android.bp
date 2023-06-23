@@ -33,6 +33,7 @@ java_library {
         "src/main/resources",
     ],
     libs: [
+        "grpc-java-api",
         "grpc-java-context",
         "grpc-java-core",
         "grpc-java-core-inprocess",

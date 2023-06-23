@@ -30,6 +30,7 @@ java_library {
         "src/main/java/**/*.java",
     ],
     libs: [
+        "grpc-java-api",
         "grpc-java-core",
         "guava",
         "jsr305",

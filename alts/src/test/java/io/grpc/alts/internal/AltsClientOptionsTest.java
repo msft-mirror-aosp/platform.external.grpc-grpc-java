@@ -19,7 +19,6 @@ package io.grpc.alts.internal;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.collect.ImmutableList;
-import io.grpc.alts.internal.TransportSecurityCommon.RpcProtocolVersions;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -50,7 +49,8 @@ public final class AltsClientOptionsTest {
             .build();
 
     assertThat(options.getTargetName()).isEqualTo(targetName);
-    assertThat(options.getTargetServiceAccounts()).containsAllOf(serviceAccount1, serviceAccount2);
+    assertThat(options.getTargetServiceAccounts())
+        .containsAtLeast(serviceAccount1, serviceAccount2);
     assertThat(options.getRpcProtocolVersions()).isEqualTo(rpcVersions);
   }
 }

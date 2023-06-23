@@ -63,7 +63,7 @@ public abstract class AbstractStub<S extends AbstractStub<S>> {
   }
 
   /**
-   * Constructor for use by subclasses, with the default {@code CallOptions}.
+   * Constructor for use by subclasses.
    *
    * @since 1.0.0
    * @param channel the channel that this stub will use to do communications
@@ -102,6 +102,31 @@ public abstract class AbstractStub<S extends AbstractStub<S>> {
   protected abstract S build(Channel channel, CallOptions callOptions);
 
   /**
+   * Returns a new stub with the given channel for the provided method configurations.
+   *
+   * @since 1.26.0
+   * @param factory the factory to create a stub
+   * @param channel the channel that this stub will use to do communications
+   */
+  public static <T extends AbstractStub<T>> T newStub(
+      StubFactory<T> factory, Channel channel) {
+    return newStub(factory, channel, CallOptions.DEFAULT);
+  }
+
+  /**
+   * Returns a new stub with the given channel for the provided method configurations.
+   *
+   * @since 1.26.0
+   * @param factory the factory to create a stub
+   * @param channel the channel that this stub will use to do communications
+   * @param callOptions the runtime call options to be applied to every call on this stub
+   */
+  public static <T extends AbstractStub<T>> T newStub(
+      StubFactory<T> factory, Channel channel, CallOptions callOptions) {
+    return factory.newStub(channel, callOptions);
+  }
+
+  /**
    * Returns a new stub with an absolute deadline.
    *
    * <p>This is mostly used for propagating an existing deadline. {@link #withDeadlineAfter} is the
@@ -138,14 +163,11 @@ public abstract class AbstractStub<S extends AbstractStub<S>> {
   /**
    *  Set's the compressor name to use for the call.  It is the responsibility of the application
    *  to make sure the server supports decoding the compressor picked by the client.  To be clear,
-   *  this is the compressor used by the stub to compress messages to the server.  To get
-   *  compressed responses from the server, set the appropriate {@link io.grpc.DecompressorRegistry}
-   *  on the {@link io.grpc.ManagedChannelBuilder}.
+   *  this is the compressor used by the stub to compress messages to the server.
    *
    * @since 1.0.0
    * @param compressorName the name (e.g. "gzip") of the compressor to use.
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public final S withCompression(String compressorName) {
     return build(channel, callOptions.withCompression(compressorName));
   }
@@ -195,7 +217,12 @@ public abstract class AbstractStub<S extends AbstractStub<S>> {
   }
 
   /**
-   * Returns a new stub that uses the 'wait for ready' call option.
+   * Returns a new stub that uses
+   * <a href="https://github.com/grpc/grpc/blob/master/doc/wait-for-ready.md">'wait for ready'</a>
+   * for the call. Wait-for-ready queues the RPC until a connection is available. This may
+   * dramatically increase the latency of the RPC, but avoids failing "unnecessarily." The default
+   * queues the RPC until an attempt to connect has completed, but fails RPCs without sending them
+   * if unable to connect.
    *
    * @since 1.1.0
    */
@@ -223,5 +250,14 @@ public abstract class AbstractStub<S extends AbstractStub<S>> {
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2563")
   public final S withMaxOutboundMessageSize(int maxSize) {
     return build(channel, callOptions.withMaxOutboundMessageSize(maxSize));
+  }
+
+  /**
+   * A factory class for stub.
+   *
+   * @since 1.26.0
+   */
+  public interface StubFactory<T extends AbstractStub<T>> {
+    T newStub(Channel channel, CallOptions callOptions);
   }
 }

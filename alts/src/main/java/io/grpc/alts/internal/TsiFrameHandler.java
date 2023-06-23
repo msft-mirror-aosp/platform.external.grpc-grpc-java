@@ -19,9 +19,7 @@ package io.grpc.alts.internal;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
-import com.google.common.annotations.VisibleForTesting;
 import io.grpc.alts.internal.TsiFrameProtector.Consumer;
-import io.grpc.alts.internal.TsiHandshakeHandler.TsiHandshakeCompletionEvent;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelHandlerContext;
@@ -33,7 +31,8 @@ import java.net.SocketAddress;
 import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Future;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Encrypts and decrypts TSI Frames. Writes are buffered here until {@link #flush} is called. Writes
@@ -41,10 +40,15 @@ import java.util.concurrent.Future;
  */
 public final class TsiFrameHandler extends ByteToMessageDecoder implements ChannelOutboundHandler {
 
+  private static final Logger logger = Logger.getLogger(TsiFrameHandler.class.getName());
+
   private TsiFrameProtector protector;
   private PendingWriteQueue pendingUnprotectedWrites;
+  private boolean closeInitiated;
 
-  public TsiFrameHandler() {}
+  public TsiFrameHandler(TsiFrameProtector protector) {
+    this.protector = checkNotNull(protector, "protector");
+  }
 
   @Override
   public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
@@ -54,39 +58,22 @@ public final class TsiFrameHandler extends ByteToMessageDecoder implements Chann
   }
 
   @Override
-  public void userEventTriggered(ChannelHandlerContext ctx, Object event) throws Exception {
-    if (event instanceof TsiHandshakeCompletionEvent) {
-      TsiHandshakeCompletionEvent tsiEvent = (TsiHandshakeCompletionEvent) event;
-      if (tsiEvent.isSuccess()) {
-        setProtector(tsiEvent.protector());
-      }
-      // Ignore errors.  Another handler in the pipeline must handle TSI Errors.
-    }
-    // Keep propagating the message, as others may want to read it.
-    super.userEventTriggered(ctx, event);
-  }
-
-  @VisibleForTesting
-  void setProtector(TsiFrameProtector protector) {
-    checkState(this.protector == null);
-    this.protector = checkNotNull(protector);
-  }
-
-  @Override
   protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
-    checkState(protector != null, "Cannot read frames while the TSI handshake is in progress");
+    checkState(protector != null, "decode() called after close()");
     protector.unprotect(in, out, ctx.alloc());
   }
 
   @Override
-  public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise)
-      throws Exception {
-    checkState(protector != null, "Cannot write frames while the TSI handshake is in progress");
+  @SuppressWarnings("FutureReturnValueIgnored") // for setSuccess
+  public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise) {
+    if (protector == null) {
+      promise.setFailure(new IllegalStateException("write() called after close()"));
+      return;
+    }
     ByteBuf msg = (ByteBuf) message;
     if (!msg.isReadable()) {
       // Nothing to encode.
-      @SuppressWarnings("unused") // go/futurereturn-lsc
-      Future<?> possiblyIgnoredError = promise.setSuccess();
+      promise.setSuccess();
       return;
     }
 
@@ -96,23 +83,81 @@ public final class TsiFrameHandler extends ByteToMessageDecoder implements Chann
 
   @Override
   public void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
-    if (!pendingUnprotectedWrites.isEmpty()) {
-      pendingUnprotectedWrites.removeAndFailAll(
-          new ChannelException("Pending write on removal of TSI handler"));
+    destroyProtectorAndWrites();
+  }
+
+  @Override
+  public void disconnect(ChannelHandlerContext ctx, ChannelPromise promise) {
+    doClose(ctx);
+    ctx.disconnect(promise);
+  }
+
+  @Override
+  public void close(ChannelHandlerContext ctx, ChannelPromise promise) {
+    doClose(ctx);
+    ctx.close(promise);
+  }
+
+  private void doClose(ChannelHandlerContext ctx) {
+    if (closeInitiated) {
+      return;
+    }
+    closeInitiated = true;
+    try {
+      // flush any remaining writes before close
+      if (!pendingUnprotectedWrites.isEmpty()) {
+        flush(ctx);
+      }
+    } catch (GeneralSecurityException e) {
+      logger.log(Level.FINE, "Ignored error on flush before close", e);
+    } finally {
+      destroyProtectorAndWrites();
     }
   }
 
   @Override
-  public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-    pendingUnprotectedWrites.removeAndFailAll(cause);
-    super.exceptionCaught(ctx, cause);
+  @SuppressWarnings("FutureReturnValueIgnored") // for aggregatePromise.doneAllocatingPromises
+  public void flush(final ChannelHandlerContext ctx) throws GeneralSecurityException {
+    if (pendingUnprotectedWrites == null || pendingUnprotectedWrites.isEmpty()) {
+      // Return early if there's nothing to write. Otherwise protector.protectFlush() below may
+      // not check for "no-data" and go on writing the 0-byte "data" to the socket with the
+      // protection framing.
+      return;
+    }
+    // Flushes can happen after close, but only when there are no pending writes.
+    checkState(protector != null, "flush() called after close()");
+    final ProtectedPromise aggregatePromise =
+        new ProtectedPromise(ctx.channel(), ctx.executor(), pendingUnprotectedWrites.size());
+    List<ByteBuf> bufs = new ArrayList<>(pendingUnprotectedWrites.size());
+
+    // Drain the unprotected writes.
+    while (!pendingUnprotectedWrites.isEmpty()) {
+      ByteBuf in = (ByteBuf) pendingUnprotectedWrites.current();
+      bufs.add(in.retain());
+      // Remove and release the buffer and add its promise to the aggregate.
+      aggregatePromise.addUnprotectedPromise(pendingUnprotectedWrites.remove());
+    }
+
+    final class ProtectedFrameWriteFlusher implements Consumer<ByteBuf> {
+
+      @Override
+      public void accept(ByteBuf byteBuf) {
+        ctx.writeAndFlush(byteBuf, aggregatePromise.newPromise());
+      }
+    }
+
+    protector.protectFlush(bufs, new ProtectedFrameWriteFlusher(), ctx.alloc());
+    // We're done writing, start the flow of promise events.
+    aggregatePromise.doneAllocatingPromises();
   }
 
+  // Only here to fulfill ChannelOutboundHandler
   @Override
   public void bind(ChannelHandlerContext ctx, SocketAddress localAddress, ChannelPromise promise) {
     ctx.bind(localAddress, promise);
   }
 
+  // Only here to fulfill ChannelOutboundHandler
   @Override
   public void connect(
       ChannelHandlerContext ctx,
@@ -122,60 +167,33 @@ public final class TsiFrameHandler extends ByteToMessageDecoder implements Chann
     ctx.connect(remoteAddress, localAddress, promise);
   }
 
-  @Override
-  public void disconnect(ChannelHandlerContext ctx, ChannelPromise promise) {
-    ctx.disconnect(promise);
-  }
-
-  @Override
-  public void close(ChannelHandlerContext ctx, ChannelPromise promise) {
-    ctx.close(promise);
-  }
-
+  // Only here to fulfill ChannelOutboundHandler
   @Override
   public void deregister(ChannelHandlerContext ctx, ChannelPromise promise) {
     ctx.deregister(promise);
   }
 
+  // Only here to fulfill ChannelOutboundHandler
   @Override
   public void read(ChannelHandlerContext ctx) {
     ctx.read();
   }
 
-  @Override
-  public void flush(final ChannelHandlerContext ctx) throws GeneralSecurityException {
-    checkState(protector != null, "Cannot write frames while the TSI handshake is in progress");
-    final ProtectedPromise aggregatePromise =
-        new ProtectedPromise(ctx.channel(), ctx.executor(), pendingUnprotectedWrites.size());
-
-    List<ByteBuf> bufs = new ArrayList<>(pendingUnprotectedWrites.size());
-
-    if (pendingUnprotectedWrites.isEmpty()) {
-      // Return early if there's nothing to write. Otherwise protector.protectFlush() below may
-      // not check for "no-data" and go on writing the 0-byte "data" to the socket with the
-      // protection framing.
-      return;
+  private void destroyProtectorAndWrites() {
+    try {
+      if (pendingUnprotectedWrites != null && !pendingUnprotectedWrites.isEmpty()) {
+        pendingUnprotectedWrites.removeAndFailAll(
+            new ChannelException("Pending write on teardown of TSI handler"));
+      }
+    } finally {
+      pendingUnprotectedWrites = null;
     }
-    // Drain the unprotected writes.
-    while (!pendingUnprotectedWrites.isEmpty()) {
-      ByteBuf in = (ByteBuf) pendingUnprotectedWrites.current();
-      bufs.add(in.retain());
-      // Remove and release the buffer and add its promise to the aggregate.
-      aggregatePromise.addUnprotectedPromise(pendingUnprotectedWrites.remove());
+    if (protector != null) {
+      try {
+        protector.destroy();
+      } finally {
+        protector = null;
+      }
     }
-
-    protector.protectFlush(
-        bufs,
-        new Consumer<ByteBuf>() {
-          @Override
-          public void accept(ByteBuf b) {
-            ctx.writeAndFlush(b, aggregatePromise.newPromise());
-          }
-        },
-        ctx.alloc());
-
-    // We're done writing, start the flow of promise events.
-    @SuppressWarnings("unused") // go/futurereturn-lsc
-    Future<?> possiblyIgnoredError = aggregatePromise.doneAllocatingPromises();
   }
 }
