@@ -74,6 +74,7 @@ java_library {
         "grpc-java-context",
         "grpc-java-core",
         "grpc-java-core-internal",
+        "grpc-java-core-util",
         "grpc-java-protobuf-lite",
         "grpc-java-okhttp",
     ],
