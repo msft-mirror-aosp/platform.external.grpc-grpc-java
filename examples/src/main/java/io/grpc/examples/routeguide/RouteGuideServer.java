@@ -25,6 +25,8 @@ import static java.lang.Math.sqrt;
 import static java.lang.Math.toRadians;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
+import io.grpc.Grpc;
+import io.grpc.InsecureServerCredentials;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
@@ -36,6 +38,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -54,7 +57,8 @@ public class RouteGuideServer {
 
   /** Create a RouteGuide server listening on {@code port} using {@code featureFile} database. */
   public RouteGuideServer(int port, URL featureFile) throws IOException {
-    this(ServerBuilder.forPort(port), port, RouteGuideUtil.parseFeatures(featureFile));
+    this(Grpc.newServerBuilderForPort(port, InsecureServerCredentials.create()),
+        port, RouteGuideUtil.parseFeatures(featureFile));
   }
 
   /** Create a RouteGuide server using serverBuilder as a base and features as data. */
@@ -71,18 +75,22 @@ public class RouteGuideServer {
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
       public void run() {
-        // Use stderr here since the logger may has been reset by its JVM shutdown hook.
+        // Use stderr here since the logger may have been reset by its JVM shutdown hook.
         System.err.println("*** shutting down gRPC server since JVM is shutting down");
-        RouteGuideServer.this.stop();
+        try {
+          RouteGuideServer.this.stop();
+        } catch (InterruptedException e) {
+          e.printStackTrace(System.err);
+        }
         System.err.println("*** server shut down");
       }
     });
   }
 
   /** Stop serving requests and shutdown resources. */
-  public void stop() {
+  public void stop() throws InterruptedException {
     if (server != null) {
-      server.shutdown();
+      server.shutdown().awaitTermination(30, TimeUnit.SECONDS);
     }
   }
 

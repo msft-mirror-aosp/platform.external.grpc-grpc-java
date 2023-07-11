@@ -18,15 +18,16 @@ package io.grpc.cronet;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import android.os.Build;
 import io.grpc.Attributes;
-import io.grpc.CallCredentials;
 import io.grpc.CallOptions;
+import io.grpc.ClientStreamTracer;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.SecurityLevel;
@@ -41,39 +42,57 @@ import java.net.InetSocketAddress;
 import java.util.concurrent.Executor;
 import org.chromium.net.BidirectionalStream;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
 
 @RunWith(RobolectricTestRunner.class)
+@Config(sdk = Build.VERSION_CODES.P)
 public final class CronetClientTransportTest {
+  @Rule public final MockitoRule mocks = MockitoJUnit.rule();
 
   private static final String AUTHORITY = "test.example.com";
+  private static final Attributes.Key<String> EAG_ATTR_KEY =
+      Attributes.Key.create("eag-attr");
 
+  private static final Attributes EAG_ATTRS =
+      Attributes.newBuilder().set(EAG_ATTR_KEY, "value").build();
+
+  private final ClientStreamTracer[] tracers =
+      new ClientStreamTracer[]{ new ClientStreamTracer() {} };
   private CronetClientTransport transport;
   @Mock private StreamBuilderFactory streamFactory;
-  @Mock private Executor executor;
   private MethodDescriptor<Void, Void> descriptor = TestMethodDescriptors.voidMethod();
   @Mock private ManagedClientTransport.Listener clientTransportListener;
   @Mock private BidirectionalStream.Builder builder;
+  private final Executor executor = new Executor() {
+      @Override
+      public void execute(Runnable r) {
+        r.run();
+      }
+    };
 
   @Before
   public void setUp() {
-    MockitoAnnotations.initMocks(this);
-
     transport =
         new CronetClientTransport(
             streamFactory,
             new InetSocketAddress("localhost", 443),
             AUTHORITY,
             null,
+            EAG_ATTRS,
             executor,
             5000,
             false,
-            TransportTracer.getDefaultFactory().create());
+            TransportTracer.getDefaultFactory().create(),
+            false,
+            false);
     Runnable callback = transport.start(clientTransportListener);
     assertTrue(callback != null);
     callback.run();
@@ -85,14 +104,15 @@ public final class CronetClientTransportTest {
     Attributes attrs = transport.getAttributes();
     assertEquals(
         SecurityLevel.PRIVACY_AND_INTEGRITY, attrs.get(GrpcAttributes.ATTR_SECURITY_LEVEL));
+    assertEquals(EAG_ATTRS, attrs.get(GrpcAttributes.ATTR_CLIENT_EAG_ATTRS));
   }
 
   @Test
   public void shutdownTransport() throws Exception {
     CronetClientStream stream1 =
-        transport.newStream(descriptor, new Metadata(), CallOptions.DEFAULT);
+        transport.newStream(descriptor, new Metadata(), CallOptions.DEFAULT, tracers);
     CronetClientStream stream2 =
-        transport.newStream(descriptor, new Metadata(), CallOptions.DEFAULT);
+        transport.newStream(descriptor, new Metadata(), CallOptions.DEFAULT, tracers);
 
     // Create a transport and start two streams on it.
     ArgumentCaptor<BidirectionalStream.Callback> callbackCaptor =
@@ -121,5 +141,34 @@ public final class CronetClientTransportTest {
     callback2.onCanceled(cronetStream1, null);
     // All streams are gone now.
     verify(clientTransportListener, times(1)).transportTerminated();
+  }
+
+  @Test
+  public void startStreamAfterShutdown() throws Exception {
+    CronetClientStream stream =
+        transport.newStream(descriptor, new Metadata(), CallOptions.DEFAULT, tracers);
+    transport.shutdown();
+    BaseClientStreamListener listener = new BaseClientStreamListener();
+    stream.start(listener);
+
+    assertEquals(Status.UNAVAILABLE.getCode(), listener.status.getCode());
+  }
+
+  private static class BaseClientStreamListener implements ClientStreamListener {
+    private Status status;
+
+    @Override
+    public void messagesAvailable(MessageProducer producer) {}
+
+    @Override
+    public void onReady() {}
+
+    @Override
+    public void headersRead(Metadata headers) {}
+
+    @Override
+    public void closed(Status status, RpcProgress rpcProgress, Metadata trailers) {
+      this.status = status;
+    }
   }
 }

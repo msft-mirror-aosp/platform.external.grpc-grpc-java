@@ -18,6 +18,7 @@ package io.grpc.okhttp;
 
 import static com.google.common.base.Charsets.UTF_8;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -41,13 +42,14 @@ import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.mockito.Mockito;
+import org.mockito.ArgumentMatchers;
 
 /**
  * Tests for {@link OkHttpProtocolNegotiator}.
  */
 @RunWith(JUnit4.class)
 public class OkHttpProtocolNegotiatorTest {
+  @SuppressWarnings("deprecation") // https://github.com/grpc/grpc-java/issues/7467
   @Rule public final ExpectedException thrown = ExpectedException.none();
 
   private final SSLSocket sock = mock(SSLSocket.class);
@@ -135,32 +137,12 @@ public class OkHttpProtocolNegotiatorTest {
 
   @Test
   public void negotiate_success() throws Exception {
-    when(platform.getSelectedProtocol(Mockito.<SSLSocket>any())).thenReturn("h2");
+    when(platform.getSelectedProtocol(ArgumentMatchers.<SSLSocket>any())).thenReturn("h2");
     OkHttpProtocolNegotiator negotiator = new OkHttpProtocolNegotiator(platform);
 
     String actual = negotiator.negotiate(sock, "hostname", ImmutableList.of(Protocol.HTTP_2));
 
     assertEquals("h2", actual);
-    verify(sock).startHandshake();
-    verify(platform).getSelectedProtocol(sock);
-    verify(platform).afterHandshake(sock);
-  }
-
-  @Test
-  public void negotiate_preferGrpcExp() throws Exception {
-    // This test doesn't actually verify that grpc-exp is preferred, since the
-    // mocking of getSelectedProtocol() causes the protocol list to be ignored.
-    // The main usefulness of the test is for future changes to
-    // OkHttpProtocolNegotiator, where we can catch any change that would affect
-    // grpc-exp preference.
-    when(platform.getSelectedProtocol(Mockito.<SSLSocket>any())).thenReturn("grpc-exp");
-    OkHttpProtocolNegotiator negotiator = new OkHttpProtocolNegotiator(platform);
-
-    String actual =
-        negotiator.negotiate(sock, "hostname",
-                ImmutableList.of(Protocol.GRPC_EXP, Protocol.HTTP_2));
-
-    assertEquals("grpc-exp", actual);
     verify(sock).startHandshake();
     verify(platform).getSelectedProtocol(sock);
     verify(platform).afterHandshake(sock);
@@ -314,5 +296,10 @@ public class OkHttpProtocolNegotiatorTest {
 
     @Override
     public void startHandshake() throws IOException {}
+  }
+
+  @Test
+  public void isValidHostName_withUnderscore() {
+    assertFalse(OkHttpProtocolNegotiator.isValidHostName("test_cert_2"));
   }
 }

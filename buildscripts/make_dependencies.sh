@@ -3,12 +3,12 @@
 # Build protoc
 set -evux -o pipefail
 
-PROTOBUF_VERSION=3.5.1
+PROTOBUF_VERSION=21.7
 
-# ARCH is 64 bit unless otherwise specified.
-ARCH="${ARCH:-64}"
+# ARCH is x86_64 bit unless otherwise specified.
+ARCH="${ARCH:-x86_64}"
 DOWNLOAD_DIR=/tmp/source
-INSTALL_DIR="/tmp/protobuf-cache/$PROTOBUF_VERSION/$(uname -s)-$(uname -p)-x86_$ARCH"
+INSTALL_DIR="/tmp/protobuf-cache/$PROTOBUF_VERSION/$(uname -s)-$ARCH"
 mkdir -p $DOWNLOAD_DIR
 
 # Start with a sane default
@@ -27,12 +27,22 @@ if [ -f ${INSTALL_DIR}/bin/protoc ]; then
 # TODO(ejona): swap to `brew install --devel protobuf` once it is up-to-date
 else
   if [[ ! -d "$DOWNLOAD_DIR"/protobuf-"${PROTOBUF_VERSION}" ]]; then
-    wget -O - https://github.com/google/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-all-${PROTOBUF_VERSION}.tar.gz | tar xz -C $DOWNLOAD_DIR
+    curl -Ls https://github.com/google/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-all-${PROTOBUF_VERSION}.tar.gz | tar xz -C $DOWNLOAD_DIR
   fi
   pushd $DOWNLOAD_DIR/protobuf-${PROTOBUF_VERSION}
   # install here so we don't need sudo
-  ./configure CFLAGS=-m"$ARCH" CXXFLAGS=-m"$ARCH" --disable-shared \
-    --prefix="$INSTALL_DIR"
+  if [[ "$ARCH" == x86* ]]; then
+    ./configure CFLAGS=-m${ARCH#*_} CXXFLAGS=-m${ARCH#*_} --disable-shared \
+      --prefix="$INSTALL_DIR"
+  elif [[ "$ARCH" == aarch* ]]; then
+    ./configure --disable-shared --host=aarch64-linux-gnu --prefix="$INSTALL_DIR"
+  elif [[ "$ARCH" == ppc* ]]; then
+    ./configure --disable-shared --host=powerpc64le-linux-gnu --prefix="$INSTALL_DIR"
+  elif [[ "$ARCH" == s390* ]]; then
+    ./configure --disable-shared --host=s390x-linux-gnu --prefix="$INSTALL_DIR"
+  elif [[ "$ARCH" == loongarch* ]]; then
+    ./configure --disable-shared --host=loongarch64-unknown-linux-gnu --prefix="$INSTALL_DIR"
+  fi
   # the same source dir is used for 32 and 64 bit builds, so we need to clean stale data first
   make clean
   make V=0 -j$NUM_CPU

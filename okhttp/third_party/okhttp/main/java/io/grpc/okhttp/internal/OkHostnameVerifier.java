@@ -120,6 +120,7 @@ public final class OkHostnameVerifier implements HostnameVerifier {
     return false;
   }
 
+  @SuppressWarnings("MixedMutabilityReturnType")
   public static List<String> allSubjectAltNames(X509Certificate certificate) {
     List<String> altIpaNames = getSubjectAltNames(certificate, ALT_IPA_NAME);
     List<String> altDnsNames = getSubjectAltNames(certificate, ALT_DNS_NAME);
@@ -129,6 +130,7 @@ public final class OkHostnameVerifier implements HostnameVerifier {
     return result;
   }
 
+  @SuppressWarnings("MixedMutabilityReturnType")
   private static List<String> getSubjectAltNames(X509Certificate certificate, int type) {
     List<String> result = new ArrayList<>();
     try {
@@ -168,13 +170,13 @@ public final class OkHostnameVerifier implements HostnameVerifier {
   private boolean verifyHostName(String hostName, String pattern) {
     // Basic sanity checks
     // Check length == 0 instead of .isEmpty() to support Java 5.
-    if ((hostName == null) || (hostName.length() == 0) || (hostName.startsWith("."))
-        || (hostName.endsWith(".."))) {
+    if (hostName == null || hostName.length() == 0 || hostName.startsWith(".")
+        || hostName.endsWith("..")) {
       // Invalid domain name
       return false;
     }
-    if ((pattern == null) || (pattern.length() == 0) || (pattern.startsWith("."))
-        || (pattern.endsWith(".."))) {
+    if (pattern == null || pattern.length() == 0 || pattern.startsWith(".")
+        || pattern.endsWith("..")) {
       // Invalid pattern/domain name
       return false;
     }
@@ -215,7 +217,7 @@ public final class OkHostnameVerifier implements HostnameVerifier {
     //    sub.test.example.com.
     // 3. Wildcard patterns for single-label domain names are not permitted.
 
-    if ((!pattern.startsWith("*.")) || (pattern.indexOf('*', 1) != -1)) {
+    if (!pattern.startsWith("*.") || pattern.indexOf('*', 1) != -1) {
       // Asterisk (*) is only permitted in the left-most domain name label and must be the only
       // character in that label
       return false;
@@ -243,8 +245,8 @@ public final class OkHostnameVerifier implements HostnameVerifier {
 
     // Check that asterisk did not match across domain name labels.
     int suffixStartIndexInHostName = hostName.length() - suffix.length();
-    if ((suffixStartIndexInHostName > 0)
-        && (hostName.lastIndexOf('.', suffixStartIndexInHostName - 1) != -1)) {
+    if (suffixStartIndexInHostName > 0
+        && hostName.lastIndexOf('.', suffixStartIndexInHostName - 1) != -1) {
       // Asterisk is matching across domain name labels -- not permitted.
       return false;
     }
