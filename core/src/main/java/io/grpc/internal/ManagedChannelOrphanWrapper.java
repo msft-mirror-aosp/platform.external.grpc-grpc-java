@@ -24,17 +24,24 @@ import java.lang.ref.SoftReference;
 import java.lang.ref.WeakReference;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
+/**
+ *  Best effort detecting channels that has not been properly cleaned up.
+ *  Use {@link WeakReference} to avoid keeping the channel alive and retaining too much memory.
+ *  Check lost references only on new channel creation and log message to indicate
+ *  the previous channel (id and target) that has not been shutdown. This is done to avoid Object
+ *  finalizers.
+ */
 final class ManagedChannelOrphanWrapper extends ForwardingManagedChannel {
   private static final ReferenceQueue<ManagedChannelOrphanWrapper> refqueue =
-      new ReferenceQueue<ManagedChannelOrphanWrapper>();
+      new ReferenceQueue<>();
   // Retain the References so they don't get GC'd
   private static final ConcurrentMap<ManagedChannelReference, ManagedChannelReference> refs =
-      new ConcurrentHashMap<ManagedChannelReference, ManagedChannelReference>();
+      new ConcurrentHashMap<>();
   private static final Logger logger =
       Logger.getLogger(ManagedChannelOrphanWrapper.class.getName());
 
@@ -55,23 +62,14 @@ final class ManagedChannelOrphanWrapper extends ForwardingManagedChannel {
 
   @Override
   public ManagedChannel shutdown() {
-    phantom.shutdown = true;
+    phantom.clearSafely();
     return super.shutdown();
   }
 
   @Override
   public ManagedChannel shutdownNow() {
-    phantom.shutdownNow = true;
+    phantom.clearSafely();
     return super.shutdownNow();
-  }
-
-  @Override
-  public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
-    boolean ret = super.awaitTermination(timeout, unit);
-    if (ret) {
-      phantom.clear();
-    }
-    return ret;
   }
 
   @VisibleForTesting
@@ -82,15 +80,16 @@ final class ManagedChannelOrphanWrapper extends ForwardingManagedChannel {
 
     private static final boolean ENABLE_ALLOCATION_TRACKING =
         Boolean.parseBoolean(System.getProperty(ALLOCATION_SITE_PROPERTY_NAME, "true"));
+
+    @SuppressWarnings("StaticAssignmentOfThrowable")
     private static final RuntimeException missingCallSite = missingCallSite();
 
     private final ReferenceQueue<ManagedChannelOrphanWrapper> refqueue;
     private final ConcurrentMap<ManagedChannelReference, ManagedChannelReference> refs;
 
-    private final ManagedChannel channel;
+    private final String channelStr;
     private final Reference<RuntimeException> allocationSite;
-    private volatile boolean shutdown;
-    private volatile boolean shutdownNow;
+    private final AtomicBoolean shutdown = new AtomicBoolean();
 
     ManagedChannelReference(
         ManagedChannelOrphanWrapper orphanable,
@@ -98,11 +97,11 @@ final class ManagedChannelOrphanWrapper extends ForwardingManagedChannel {
         ReferenceQueue<ManagedChannelOrphanWrapper> refqueue,
         ConcurrentMap<ManagedChannelReference, ManagedChannelReference> refs) {
       super(orphanable, refqueue);
-      allocationSite = new SoftReference<RuntimeException>(
+      allocationSite = new SoftReference<>(
           ENABLE_ALLOCATION_TRACKING
               ? new RuntimeException("ManagedChannel allocation site")
               : missingCallSite);
-      this.channel = channel;
+      this.channelStr = channel.toString();
       this.refqueue = refqueue;
       this.refs = refs;
       this.refs.put(this, this);
@@ -120,6 +119,15 @@ final class ManagedChannelOrphanWrapper extends ForwardingManagedChannel {
       // We run this here to periodically clean up the queue if at least some of the channels are
       // being shutdown properly.
       cleanQueue(refqueue);
+    }
+
+    /**
+     * Safe to call concurrently.
+     */
+    private void clearSafely() {
+      if (!shutdown.getAndSet(true)) {
+        clear();
+      }
     }
 
     // avoid reentrancy
@@ -144,21 +152,18 @@ final class ManagedChannelOrphanWrapper extends ForwardingManagedChannel {
       while ((ref = (ManagedChannelReference) refqueue.poll()) != null) {
         RuntimeException maybeAllocationSite = ref.allocationSite.get();
         ref.clearInternal(); // technically the reference is gone already.
-        if (!(ref.shutdown && ref.channel.isTerminated())) {
+        if (!ref.shutdown.get()) {
           orphanedChannels++;
-          Level level = ref.shutdownNow ? Level.FINE : Level.SEVERE;
+          Level level = Level.SEVERE;
           if (logger.isLoggable(level)) {
             String fmt =
-                "*~*~*~ Channel {0} was not "
-                // Prefer to complain about shutdown if neither has been called.
-                + (!ref.shutdown ? "shutdown" : "terminated")
-                + " properly!!! ~*~*~*"
-                + System.getProperty("line.separator")
-                + "    Make sure to call shutdown()/shutdownNow() and wait "
-                + "until awaitTermination() returns true.";
+                "*~*~*~ Previous channel {0} was not shutdown properly!!! ~*~*~*"
+                    + System.getProperty("line.separator")
+                    + "    Make sure to call shutdown()/shutdownNow() and wait "
+                    + "until awaitTermination() returns true.";
             LogRecord lr = new LogRecord(level, fmt);
             lr.setLoggerName(logger.getName());
-            lr.setParameters(new Object[]{ref.channel.toString()});
+            lr.setParameters(new Object[] {ref.channelStr});
             lr.setThrown(maybeAllocationSite);
             logger.log(lr);
           }

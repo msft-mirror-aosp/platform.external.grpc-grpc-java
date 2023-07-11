@@ -30,6 +30,7 @@ java_library {
         "src/main/java/**/*.java",
     ],
     libs: [
+        "grpc-java-api",
         "grpc-java-core",
         "guava",
         "jsr305",
@@ -38,9 +39,11 @@ java_library {
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
     sdk_version: "current",
-    min_sdk_version: "33",
+    min_sdk_version: "30",
     apex_available: [
         "com.android.adservices",
+        "com.android.devicelock",
+        "com.android.extservices",
         "//apex_available:platform",
     ],
 }

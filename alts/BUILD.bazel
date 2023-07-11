@@ -1,3 +1,4 @@
+load("@rules_proto//proto:defs.bzl", "proto_library")
 load("//:java_grpc_library.bzl", "java_grpc_library")
 
 java_library(
@@ -8,12 +9,14 @@ java_library(
     deps = [
         ":handshaker_java_grpc",
         ":handshaker_java_proto",
-        "//core",
+        "//api",
         "//core:internal",
+        "//grpclb",
         "//netty",
         "//stub",
         "@com_google_code_findbugs_jsr305//jar",
         "@com_google_guava_guava//jar",
+        "@com_google_j2objc_j2objc_annotations//jar",
         "@com_google_protobuf//:protobuf_java",
         "@com_google_protobuf//:protobuf_java_util",
         "@io_netty_netty_buffer//jar",
@@ -30,21 +33,21 @@ java_library(
         "src/main/java/io/grpc/alts/*.java",
     ]),
     visibility = ["//visibility:public"],
-    runtime_deps = ["//grpclb"],
     deps = [
         ":alts_internal",
+        ":handshaker_java_proto",
         ":handshaker_java_grpc",
-        "//core",
-        "//core:internal",
+        "//api",
         "//auth",
+        "//core:internal",
         "//netty",
         "@com_google_auth_google_auth_library_oauth2_http//jar",
         "@com_google_code_findbugs_jsr305//jar",
         "@com_google_guava_guava//jar",
+        "@com_google_j2objc_j2objc_annotations//jar",
         "@io_netty_netty_common//jar",
         "@io_netty_netty_handler//jar",
         "@io_netty_netty_transport//jar",
-        "@org_apache_commons_commons_lang3//jar",
     ],
 )
 
