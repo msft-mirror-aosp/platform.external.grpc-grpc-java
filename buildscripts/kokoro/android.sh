@@ -10,40 +10,56 @@ BASE_DIR="$(pwd)"
 
 cd "$BASE_DIR/github/grpc-java"
 
-export GRADLE_OPTS=-Xmx512m
 export LDFLAGS=-L/tmp/protobuf/lib
 export CXXFLAGS=-I/tmp/protobuf/include
 export LD_LIBRARY_PATH=/tmp/protobuf/lib
 export OS_NAME=$(uname)
 
+cat <<EOF >> gradle.properties
+# defaults to -Xmx512m -XX:MaxMetaspaceSize=256m
+# https://docs.gradle.org/current/userguide/build_environment.html#sec:configuring_jvm_memory
+# Increased due to java.lang.OutOfMemoryError: Metaspace failures, "JVM heap
+# space is exhausted", and to increase build speed
+org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m
+EOF
+
+echo y | ${ANDROID_HOME}/tools/bin/sdkmanager "build-tools;28.0.3"
+
 # Proto deps
 buildscripts/make_dependencies.sh
 
-./gradlew install
+# Build Android with Java 11, this adds it to the PATH
+sudo update-java-alternatives --set java-1.11.0-openjdk-amd64
+# Unset any existing JAVA_HOME env var to stop Gradle from using it
+unset JAVA_HOME
 
-# Build grpc-cronet
+GRADLE_FLAGS="-Pandroid.useAndroidX=true"
 
-pushd cronet
-../gradlew build
-popd
+./gradlew \
+    :grpc-android-interop-testing:build \
+    :grpc-android:build \
+    :grpc-cronet:build \
+    :grpc-binder:build \
+    assembleAndroidTest \
+    publishToMavenLocal \
+    $GRADLE_FLAGS
 
-# Build grpc-android
-
-pushd android
-../gradlew build
-popd
+if [[ ! -z $(git status --porcelain) ]]; then
+  git status
+  echo "Error Working directory is not clean. Forget to commit generated files?"
+  exit 1
+fi
 
 # Build examples
 
 cd ./examples/android/clientcache
-./gradlew build
+../../gradlew build
 cd ../routeguide
-./gradlew build
+../../gradlew build
 cd ../helloworld
-./gradlew build
-
-cd "$BASE_DIR/github/grpc-java/examples/example-kotlin/android/helloworld/"
-./gradlew build
+../../gradlew build
+cd ../strictmode
+../../gradlew build
 
 # Skip APK size and dex count comparisons for non-PR builds
 
@@ -59,6 +75,7 @@ cp "$BASE_DIR/github/grpc-java/buildscripts/set_github_status.py" "$SET_GITHUB_S
 
 
 # Collect APK size and dex count stats for the helloworld example
+sudo update-java-alternatives --set java-1.8.0-openjdk-amd64
 
 HELLO_WORLD_OUTPUT_DIR="$BASE_DIR/github/grpc-java/examples/android/helloworld/app/build/outputs"
 
@@ -76,13 +93,17 @@ new_apk_size="$(stat --printf=%s $HELLO_WORLD_OUTPUT_DIR/apk/release/app-release
 
 
 # Get the APK size and dex count stats using the pull request base commit
+sudo update-java-alternatives --set java-1.11.0-openjdk-amd64
 
 cd $BASE_DIR/github/grpc-java
+./gradlew clean
 git checkout HEAD^
-./gradlew install
+./gradlew --stop  # use a new daemon to build the previous commit
+./gradlew publishToMavenLocal $GRADLE_FLAGS
 cd examples/android/helloworld/
-./gradlew build
+../../gradlew build
 
+sudo update-java-alternatives --set java-1.8.0-openjdk-amd64
 read -r ignored old_dex_count < \
   <("${ANDROID_HOME}/tools/bin/apkanalyzer" dex references app/build/outputs/apk/release/app-release-unsigned.apk)
 

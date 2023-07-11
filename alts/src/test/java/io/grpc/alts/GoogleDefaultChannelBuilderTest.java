@@ -16,10 +16,6 @@
 
 package io.grpc.alts;
 
-import static com.google.common.truth.Truth.assertThat;
-
-import io.grpc.alts.internal.GoogleDefaultProtocolNegotiator;
-import io.grpc.netty.ProtocolNegotiator;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -31,8 +27,5 @@ public final class GoogleDefaultChannelBuilderTest {
   public void buildsNettyChannel() throws Exception {
     GoogleDefaultChannelBuilder builder = GoogleDefaultChannelBuilder.forTarget("localhost:8080");
     builder.build();
-
-    ProtocolNegotiator protocolNegotiator = builder.getProtocolNegotiatorForTest();
-    assertThat(protocolNegotiator).isInstanceOf(GoogleDefaultProtocolNegotiator.class);
   }
 }

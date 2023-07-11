@@ -38,12 +38,13 @@ import org.junit.runners.JUnit4;
  */
 @RunWith(JUnit4.class)
 public class ConnectivityStateManagerTest {
+  @SuppressWarnings("deprecation") // https://github.com/grpc/grpc-java/issues/7467
   @Rule
   public final ExpectedException thrown = ExpectedException.none();
 
   private final FakeClock executor = new FakeClock();
   private final ConnectivityStateManager state = new ConnectivityStateManager();
-  private final LinkedList<ConnectivityState> sink = new LinkedList<ConnectivityState>();
+  private final LinkedList<ConnectivityState> sink = new LinkedList<>();
 
   @Test
   public void noCallback() {
@@ -147,7 +148,7 @@ public class ConnectivityStateManagerTest {
 
   @Test
   public void multipleCallbacks() {
-    final LinkedList<String> callbackRuns = new LinkedList<String>();
+    final LinkedList<String> callbackRuns = new LinkedList<>();
     state.notifyWhenStateChanged(new Runnable() {
         @Override
         public void run() {
