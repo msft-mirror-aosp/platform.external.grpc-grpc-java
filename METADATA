@@ -10,7 +10,7 @@ third_party {
     type: GIT
     value: "https://github.com/grpc/grpc-java"
   }
-  version: "v1.16.1"
-  last_upgrade_date: { year: 2020 month: 07 day: 24 }
+  version: "v1.56"
+  last_upgrade_date: { year: 2023 month: 06 day: 20 }
   license_type: NOTICE
 }
