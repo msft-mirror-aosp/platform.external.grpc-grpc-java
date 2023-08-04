@@ -16,10 +16,10 @@
 
 package io.grpc.alts.internal;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
-import io.grpc.alts.internal.Handshaker.HandshakerReq;
-import io.grpc.alts.internal.Handshaker.HandshakerResp;
 import io.grpc.alts.internal.HandshakerServiceGrpc.HandshakerServiceStub;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
@@ -29,23 +29,27 @@ import java.util.concurrent.atomic.AtomicReference;
 /** An interface to the ALTS handshaker service. */
 class AltsHandshakerStub {
   private final StreamObserver<HandshakerResp> reader = new Reader();
-  private final StreamObserver<HandshakerReq> writer;
+  private StreamObserver<HandshakerReq> writer;
+  private final HandshakerServiceStub serviceStub;
   private final ArrayBlockingQueue<Optional<HandshakerResp>> responseQueue =
-      new ArrayBlockingQueue<Optional<HandshakerResp>>(1);
+      new ArrayBlockingQueue<>(1);
   private final AtomicReference<String> exceptionMessage = new AtomicReference<>();
 
+  private static final long HANDSHAKE_RPC_DEADLINE_SECS = 20;
+
   AltsHandshakerStub(HandshakerServiceStub serviceStub) {
-    this.writer = serviceStub.doHandshake(this.reader);
+    this.serviceStub = serviceStub;
   }
 
   @VisibleForTesting
   AltsHandshakerStub() {
-    writer = null;
+    serviceStub = null;
   }
 
   @VisibleForTesting
   AltsHandshakerStub(StreamObserver<HandshakerReq> writer) {
     this.writer = writer;
+    serviceStub = null;
   }
 
   @VisibleForTesting
@@ -55,16 +59,31 @@ class AltsHandshakerStub {
 
   /** Send a handshaker request and return the handshaker response. */
   public HandshakerResp send(HandshakerReq req) throws InterruptedException, IOException {
+    createWriterIfNull();
     maybeThrowIoException();
     if (!responseQueue.isEmpty()) {
       throw new IOException("Received an unexpected response.");
     }
+
     writer.onNext(req);
     Optional<HandshakerResp> result = responseQueue.take();
-    if (!result.isPresent()) {
-      maybeThrowIoException();
+    if (result.isPresent()) {
+      return result.get();
     }
-    return result.get();
+
+    if (exceptionMessage.get() != null) {
+      throw new IOException(exceptionMessage.get());
+    } else {
+      throw new IOException("No handshaker response received");
+    }
+  }
+
+  /** Create a new writer if the writer is null. */
+  private void createWriterIfNull() {
+    if (writer == null) {
+      writer =
+          serviceStub.withDeadlineAfter(HANDSHAKE_RPC_DEADLINE_SECS, SECONDS).doHandshake(reader);
+    }
   }
 
   /** Throw exception if there is an outstanding exception. */
@@ -76,7 +95,9 @@ class AltsHandshakerStub {
 
   /** Close the connection. */
   public void close() {
-    writer.onCompleted();
+    if (writer != null) {
+      writer.onCompleted();
+    }
   }
 
   private class Reader implements StreamObserver<HandshakerResp> {

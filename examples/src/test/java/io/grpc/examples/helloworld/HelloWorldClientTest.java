@@ -32,12 +32,14 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 
 /**
  * Unit tests for {@link HelloWorldClient}.
  * For demonstrating how to write gRPC unit test only.
  * Not intended to provide a high code coverage or to test every major usecase.
+ *
+ * directExecutor() makes it easier to have deterministic tests.
  *
  * <p>For more unit test examples see {@link io.grpc.examples.routeguide.RouteGuideClientTest} and
  * {@link io.grpc.examples.routeguide.RouteGuideServerTest}.
@@ -52,7 +54,18 @@ public class HelloWorldClientTest {
   public final GrpcCleanupRule grpcCleanup = new GrpcCleanupRule();
 
   private final GreeterGrpc.GreeterImplBase serviceImpl =
-      mock(GreeterGrpc.GreeterImplBase.class, delegatesTo(new GreeterGrpc.GreeterImplBase() {}));
+      mock(GreeterGrpc.GreeterImplBase.class, delegatesTo(
+          new GreeterGrpc.GreeterImplBase() {
+          // By default the client will receive Status.UNIMPLEMENTED for all RPCs.
+          // You might need to implement necessary behaviors for your test here, like this:
+          //
+          // @Override
+          // public void sayHello(HelloRequest request, StreamObserver<HelloReply> respObserver) {
+          //   respObserver.onNext(HelloReply.getDefaultInstance());
+          //   respObserver.onCompleted();
+          // }
+          }));
+
   private HelloWorldClient client;
 
   @Before
@@ -83,7 +96,7 @@ public class HelloWorldClientTest {
     client.greet("test name");
 
     verify(serviceImpl)
-        .sayHello(requestCaptor.capture(), Matchers.<StreamObserver<HelloReply>>any());
+        .sayHello(requestCaptor.capture(), ArgumentMatchers.<StreamObserver<HelloReply>>any());
     assertEquals("test name", requestCaptor.getValue().getName());
   }
 }
