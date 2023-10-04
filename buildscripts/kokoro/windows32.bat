@@ -19,16 +19,17 @@ set PATH=C:\Program Files\java\jdk1.8.0_152\bin;%PATH%
 
 mkdir grpc-java-helper32
 cd grpc-java-helper32
-call "%VS120COMNTOOLS%\vsvars32.bat" || exit /b 1
+call "%VS140COMNTOOLS%\vsvars32.bat" || exit /b 1
 call "%WORKSPACE%\buildscripts\make_dependencies.bat" || exit /b 1
 
 cd "%WORKSPACE%"
 
 SET TARGET_ARCH=x86_32
 SET FAIL_ON_WARNINGS=true
-SET VC_PROTOBUF_LIBS=%ESCWORKSPACE%\\grpc-java-helper32\\protobuf-%PROTOBUF_VER%\\cmake\\build\\Release
-SET VC_PROTOBUF_INCLUDE=%ESCWORKSPACE%\\grpc-java-helper32\\protobuf-%PROTOBUF_VER%\\cmake\\build\\include
-SET GRADLE_FLAGS=-PtargetArch=%TARGET_ARCH% -PfailOnWarnings=%FAIL_ON_WARNINGS% -PvcProtobufLibs=%VC_PROTOBUF_LIBS% -PvcProtobufInclude=%VC_PROTOBUF_INCLUDE%
+SET VC_PROTOBUF_LIBS=%ESCWORKSPACE%\\grpc-java-helper32\\protobuf-%PROTOBUF_VER%\\build\\Release
+SET VC_PROTOBUF_INCLUDE=%ESCWORKSPACE%\\grpc-java-helper32\\protobuf-%PROTOBUF_VER%\\build\\include
+SET GRADLE_FLAGS=-PtargetArch=%TARGET_ARCH% -PfailOnWarnings=%FAIL_ON_WARNINGS% -PvcProtobufLibs=%VC_PROTOBUF_LIBS% -PvcProtobufInclude=%VC_PROTOBUF_INCLUDE% -PskipAndroid=true
+SET GRADLE_OPTS="-Dorg.gradle.jvmargs='-Xmx1g'"
 
 cmd.exe /C "%WORKSPACE%\gradlew.bat %GRADLE_FLAGS% build"
 set GRADLEEXIT=%ERRORLEVEL%
@@ -48,4 +49,4 @@ IF NOT %GRADLEEXIT% == 0 (
 @rem make sure no daemons have any files open
 cmd.exe /C "%WORKSPACE%\gradlew.bat --stop"
 
-cmd.exe /C "%WORKSPACE%\gradlew.bat  %GRADLE_FLAGS% -Dorg.gradle.parallel=false -PrepositoryDir=%WORKSPACE%\artifacts clean grpc-compiler:build grpc-compiler:uploadArchives" || exit /b 1
+cmd.exe /C "%WORKSPACE%\gradlew.bat  %GRADLE_FLAGS% -Dorg.gradle.parallel=false -PrepositoryDir=%WORKSPACE%\artifacts clean grpc-compiler:build grpc-compiler:publish" || exit /b 1

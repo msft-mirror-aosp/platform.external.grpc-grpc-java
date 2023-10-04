@@ -23,6 +23,7 @@ import com.google.common.base.Strings;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -108,7 +109,7 @@ public abstract class AbstractConfigurationBuilder<T extends Configuration>
   public final T build(String[] args) {
     T config = newConfiguration();
     Map<String, Param> paramMap = getParamMap();
-    Set<String> appliedParams = new TreeSet<String>(CASE_INSENSITIVE_ORDER);
+    Set<String> appliedParams = new TreeSet<>(CASE_INSENSITIVE_ORDER);
 
     for (String arg : args) {
       if (!arg.startsWith("--")) {
@@ -146,6 +147,7 @@ public abstract class AbstractConfigurationBuilder<T extends Configuration>
   }
 
   @Override
+  @SuppressWarnings("InlineMeInliner") // String.repeat() requires Java 11
   public final void printUsage() {
     System.out.println("Usage: [ARGS...]");
     int column1Width = 0;
@@ -196,7 +198,7 @@ public abstract class AbstractConfigurationBuilder<T extends Configuration>
   protected abstract T build0(T config);
 
   private Map<String, Param> getParamMap() {
-    Map<String, Param> map = new TreeMap<String, Param>(CASE_INSENSITIVE_ORDER);
+    Map<String, Param> map = new TreeMap<>(CASE_INSENSITIVE_ORDER);
     for (Param param : getParams()) {
       map.put(param.getName(), param);
     }
@@ -204,11 +206,12 @@ public abstract class AbstractConfigurationBuilder<T extends Configuration>
   }
 
   private static String commandLineFlag(Param param) {
-    String name = param.getName().toLowerCase();
+    String name = param.getName().toLowerCase(Locale.ROOT);
     String type = (!param.getType().isEmpty() ? '=' + param.getType() : "");
     return "--" + name + type;
   }
 
+  @SuppressWarnings("InlineMeInliner") // String.repeat() requires Java 11
   private static String wordWrap(String text, int startPos, int maxPos) {
     StringBuilder builder = new StringBuilder();
     int pos = startPos;

@@ -17,13 +17,16 @@
 package io.grpc.internal;
 
 import static com.google.common.base.Charsets.UTF_8;
+import static io.grpc.internal.GrpcUtil.CONTENT_LENGTH_KEY;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.isA;
-import static org.mockito.Matchers.same;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.isA;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -31,19 +34,21 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.common.io.CharStreams;
+import io.grpc.Attributes;
 import io.grpc.CompressorRegistry;
 import io.grpc.Context;
 import io.grpc.DecompressorRegistry;
 import io.grpc.InternalChannelz.ServerStats;
-import io.grpc.InternalChannelz.ServerStats.Builder;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.Marshaller;
 import io.grpc.MethodDescriptor.MethodType;
+import io.grpc.SecurityLevel;
 import io.grpc.ServerCall;
 import io.grpc.Status;
 import io.grpc.internal.ServerCallImpl.ServerStreamListenerImpl;
-import io.grpc.internal.testing.SingleMessageProducer;
+import io.grpc.internal.SingleMessageProducer;
+import io.perfmark.PerfMark;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -55,11 +60,15 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 @RunWith(JUnit4.class)
 public class ServerCallImplTest {
+  @SuppressWarnings("deprecation") // https://github.com/grpc/grpc-java/issues/7467
   @Rule public final ExpectedException thrown = ExpectedException.none();
+  @Rule public final MockitoRule mocks = MockitoJUnit.rule();
+
   @Mock private ServerStream stream;
   @Mock private ServerCall.Listener<Long> callListener;
 
@@ -87,11 +96,10 @@ public class ServerCallImplTest {
 
   @Before
   public void setUp() {
-    MockitoAnnotations.initMocks(this);
     context = Context.ROOT.withCancellation();
-    call = new ServerCallImpl<Long, Long>(stream, UNARY_METHOD, requestHeaders, context,
+    call = new ServerCallImpl<>(stream, UNARY_METHOD, requestHeaders, context,
         DecompressorRegistry.getDefaultInstance(), CompressorRegistry.getDefaultInstance(),
-        serverCallTracer);
+        serverCallTracer, PerfMark.createTag());
   }
 
   @Test
@@ -106,15 +114,15 @@ public class ServerCallImplTest {
 
   private void callTracer0(Status status) {
     CallTracer tracer = CallTracer.getDefaultFactory().create();
-    Builder beforeBuilder = new Builder();
+    ServerStats.Builder beforeBuilder = new ServerStats.Builder();
     tracer.updateBuilder(beforeBuilder);
     ServerStats before = beforeBuilder.build();
     assertEquals(0, before.callsStarted);
     assertEquals(0, before.lastCallStartedNanos);
 
-    call = new ServerCallImpl<Long, Long>(stream, UNARY_METHOD, requestHeaders, context,
+    call = new ServerCallImpl<>(stream, UNARY_METHOD, requestHeaders, context,
         DecompressorRegistry.getDefaultInstance(), CompressorRegistry.getDefaultInstance(),
-        tracer);
+        tracer, PerfMark.createTag());
 
     // required boilerplate
     call.sendHeaders(new Metadata());
@@ -122,7 +130,7 @@ public class ServerCallImplTest {
     // end: required boilerplate
 
     call.close(status, new Metadata());
-    Builder afterBuilder = new Builder();
+    ServerStats.Builder afterBuilder = new ServerStats.Builder();
     tracer.updateBuilder(afterBuilder);
     ServerStats after = afterBuilder.build();
     assertEquals(1, after.callsStarted);
@@ -150,6 +158,16 @@ public class ServerCallImplTest {
   }
 
   @Test
+  public void sendHeader_contentLengthDiscarded() {
+    Metadata headers = new Metadata();
+    headers.put(CONTENT_LENGTH_KEY, "123");
+    call.sendHeaders(headers);
+
+    verify(stream).writeHeaders(headers);
+    assertNull(headers.get(CONTENT_LENGTH_KEY));
+  }
+
+  @Test
   public void sendHeader_failsOnSecondCall() {
     call.sendHeaders(new Metadata());
     thrown.expect(IllegalStateException.class);
@@ -174,7 +192,6 @@ public class ServerCallImplTest {
     call.sendMessage(1234L);
 
     verify(stream).writeMessage(isA(InputStream.class));
-    verify(stream).flush();
   }
 
   @Test
@@ -218,14 +235,15 @@ public class ServerCallImplTest {
 
   private void sendMessage_serverSendsOne_closeOnSecondCall(
       MethodDescriptor<Long, Long> method) {
-    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<Long, Long>(
+    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<>(
         stream,
         method,
         requestHeaders,
         context,
         DecompressorRegistry.getDefaultInstance(),
         CompressorRegistry.getDefaultInstance(),
-        serverCallTracer);
+        serverCallTracer,
+        PerfMark.createTag());
     serverCall.sendHeaders(new Metadata());
     serverCall.sendMessage(1L);
     verify(stream, times(1)).writeMessage(any(InputStream.class));
@@ -252,14 +270,15 @@ public class ServerCallImplTest {
 
   private void sendMessage_serverSendsOne_closeOnSecondCall_appRunToCompletion(
       MethodDescriptor<Long, Long> method) {
-    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<Long, Long>(
+    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<>(
         stream,
         method,
         requestHeaders,
         context,
         DecompressorRegistry.getDefaultInstance(),
         CompressorRegistry.getDefaultInstance(),
-        serverCallTracer);
+        serverCallTracer,
+        PerfMark.createTag());
     serverCall.sendHeaders(new Metadata());
     serverCall.sendMessage(1L);
     serverCall.sendMessage(1L);
@@ -289,14 +308,15 @@ public class ServerCallImplTest {
 
   private void serverSendsOne_okFailsOnMissingResponse(
       MethodDescriptor<Long, Long> method) {
-    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<Long, Long>(
+    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<>(
         stream,
         method,
         requestHeaders,
         context,
         DecompressorRegistry.getDefaultInstance(),
         CompressorRegistry.getDefaultInstance(),
-        serverCallTracer);
+        serverCallTracer,
+        PerfMark.createTag());
     serverCall.close(Status.OK, new Metadata());
     ArgumentCaptor<Status> statusCaptor = ArgumentCaptor.forClass(Status.class);
     verify(stream, times(1)).cancel(statusCaptor.capture());
@@ -318,6 +338,8 @@ public class ServerCallImplTest {
     when(stream.isReady()).thenReturn(true);
 
     assertTrue(call.isReady());
+    call.close(Status.OK, new Metadata());
+    assertFalse(call.isReady());
   }
 
   @Test
@@ -335,6 +357,23 @@ public class ServerCallImplTest {
   }
 
   @Test
+  public void getSecurityLevel() {
+    Attributes attributes = Attributes.newBuilder()
+        .set(GrpcAttributes.ATTR_SECURITY_LEVEL, SecurityLevel.INTEGRITY).build();
+    when(stream.getAttributes()).thenReturn(attributes);
+    assertEquals(SecurityLevel.INTEGRITY, call.getSecurityLevel());
+    verify(stream).getAttributes();
+  }
+
+  @Test
+  public void getNullSecurityLevel() {
+    when(stream.getAttributes()).thenReturn(null);
+    assertEquals(SecurityLevel.NONE, call.getSecurityLevel());
+    verify(stream).getAttributes();
+  }
+
+
+  @Test
   public void setMessageCompression() {
     call.setMessageCompression(true);
 
@@ -344,7 +383,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_halfClosed() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
 
     streamListener.halfClosed();
 
@@ -354,7 +393,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_halfClosed_onlyOnce() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     streamListener.halfClosed();
     // canceling the call should short circuit future halfClosed() calls.
     streamListener.closed(Status.CANCELLED);
@@ -367,31 +406,34 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_closedOk() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
 
     streamListener.closed(Status.OK);
 
     verify(callListener).onComplete();
     assertTrue(context.isCancelled());
     assertNull(context.cancellationCause());
+    // The call considers cancellation to be an exceptional situation so it should
+    // not be cancelled with an OK status.
+    assertFalse(call.isCancelled());
   }
 
   @Test
   public void streamListener_closedCancelled() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
 
     streamListener.closed(Status.CANCELLED);
 
     verify(callListener).onCancel();
     assertTrue(context.isCancelled());
-    assertNull(context.cancellationCause());
+    assertNotNull(context.cancellationCause());
   }
 
   @Test
   public void streamListener_onReady() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
 
     streamListener.onReady();
 
@@ -401,7 +443,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_onReady_onlyOnce() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     streamListener.onReady();
     // canceling the call should short circuit future halfClosed() calls.
     streamListener.closed(Status.CANCELLED);
@@ -414,7 +456,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_messageRead() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     streamListener.messagesAvailable(new SingleMessageProducer(UNARY_METHOD.streamRequest(1234L)));
 
     verify(callListener).onMessage(1234L);
@@ -423,7 +465,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_messageRead_onlyOnce() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     streamListener.messagesAvailable(new SingleMessageProducer(UNARY_METHOD.streamRequest(1234L)));
     // canceling the call should short circuit future halfClosed() calls.
     streamListener.closed(Status.CANCELLED);
@@ -436,7 +478,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_unexpectedRuntimeException() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     doThrow(new RuntimeException("unexpected exception"))
         .when(callListener)
         .onMessage(any(Long.class));

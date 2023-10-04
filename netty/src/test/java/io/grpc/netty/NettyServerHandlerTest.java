@@ -28,7 +28,6 @@ import static io.grpc.netty.Utils.CONTENT_TYPE_HEADER;
 import static io.grpc.netty.Utils.HTTP_METHOD;
 import static io.grpc.netty.Utils.TE_HEADER;
 import static io.grpc.netty.Utils.TE_TRAILERS;
-import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_PRIORITY_WEIGHT;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -36,9 +35,12 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.AdditionalAnswers.delegatesTo;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -58,7 +60,9 @@ import io.grpc.ServerStreamTracer;
 import io.grpc.Status;
 import io.grpc.Status.Code;
 import io.grpc.StreamTracer;
+import io.grpc.internal.AbstractStream;
 import io.grpc.internal.GrpcUtil;
+import io.grpc.internal.KeepAliveEnforcer;
 import io.grpc.internal.KeepAliveManager;
 import io.grpc.internal.ServerStream;
 import io.grpc.internal.ServerStreamListener;
@@ -69,7 +73,6 @@ import io.grpc.internal.testing.TestServerStreamTracer;
 import io.grpc.netty.GrpcHttp2HeadersUtils.GrpcHttp2ServerHeadersDecoder;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
@@ -97,8 +100,9 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.mockito.stubbing.Answer;
 
 /**
@@ -109,8 +113,8 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
 
   @Rule
   public final TestRule globalTimeout = new DisableOnDebug(Timeout.seconds(10));
-
-  private static final int STREAM_ID = 3;
+  @Rule
+  public final MockitoRule mocks = MockitoJUnit.rule();
 
   private static final AsciiString HTTP_FAKE_METHOD = AsciiString.of("FAKE");
 
@@ -128,7 +132,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
   private NettyServerStream stream;
   private KeepAliveManager spyKeepAliveManager;
 
-  final Queue<InputStream> streamListenerMessageQueue = new LinkedList<InputStream>();
+  final Queue<InputStream> streamListenerMessageQueue = new LinkedList<>();
 
   private int maxConcurrentStreams = Integer.MAX_VALUE;
   private int maxHeaderListSize = Integer.MAX_VALUE;
@@ -159,8 +163,6 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
 
   @Before
   public void setUp() {
-    MockitoAnnotations.initMocks(this);
-
     when(streamTracerFactory.newServerStreamTracer(anyString(), any(Metadata.class)))
         .thenReturn(streamTracer);
 
@@ -329,14 +331,73 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
   }
 
   @Test
-  public void closeShouldCloseChannel() throws Exception {
+  public void closeShouldGracefullyCloseChannel() throws Exception {
     manualSetUp();
     handler().close(ctx(), newPromise());
 
+    verifyWrite().writeGoAway(eq(ctx()), eq(Integer.MAX_VALUE), eq(Http2Error.NO_ERROR.code()),
+        isA(ByteBuf.class), any(ChannelPromise.class));
+    verifyWrite().writePing(
+        eq(ctx()),
+        eq(false),
+        eq(NettyServerHandler.GRACEFUL_SHUTDOWN_PING),
+        isA(ChannelPromise.class));
+    channelRead(pingFrame(/*ack=*/ true , NettyServerHandler.GRACEFUL_SHUTDOWN_PING));
+
     verifyWrite().writeGoAway(eq(ctx()), eq(0), eq(Http2Error.NO_ERROR.code()),
-        eq(Unpooled.EMPTY_BUFFER), any(ChannelPromise.class));
+        isA(ByteBuf.class), any(ChannelPromise.class));
 
     // Verify that the channel was closed.
+    assertFalse(channel().isOpen());
+  }
+
+  @Test
+  public void gracefulCloseShouldGracefullyCloseChannel() throws Exception {
+    manualSetUp();
+    handler()
+        .write(ctx(), new GracefulServerCloseCommand("test", 1, TimeUnit.MINUTES), newPromise());
+
+    verifyWrite().writeGoAway(eq(ctx()), eq(Integer.MAX_VALUE), eq(Http2Error.NO_ERROR.code()),
+        isA(ByteBuf.class), any(ChannelPromise.class));
+    verifyWrite().writePing(
+        eq(ctx()),
+        eq(false),
+        eq(NettyServerHandler.GRACEFUL_SHUTDOWN_PING),
+        isA(ChannelPromise.class));
+    channelRead(pingFrame(/*ack=*/ true , NettyServerHandler.GRACEFUL_SHUTDOWN_PING));
+
+    verifyWrite().writeGoAway(eq(ctx()), eq(0), eq(Http2Error.NO_ERROR.code()),
+        isA(ByteBuf.class), any(ChannelPromise.class));
+
+    // Verify that the channel was closed.
+    assertFalse(channel().isOpen());
+  }
+
+  @Test
+  public void secondGracefulCloseIsSafe() throws Exception {
+    manualSetUp();
+    handler().write(ctx(), new GracefulServerCloseCommand("test"), newPromise());
+
+    verifyWrite().writeGoAway(eq(ctx()), eq(Integer.MAX_VALUE), eq(Http2Error.NO_ERROR.code()),
+        isA(ByteBuf.class), any(ChannelPromise.class));
+    verifyWrite().writePing(
+        eq(ctx()),
+        eq(false),
+        eq(NettyServerHandler.GRACEFUL_SHUTDOWN_PING),
+        isA(ChannelPromise.class));
+
+    handler().write(ctx(), new GracefulServerCloseCommand("test2"), newPromise());
+
+    channel().runPendingTasks();
+    // No additional GOAWAYs.
+    verifyWrite().writeGoAway(any(ChannelHandlerContext.class), any(Integer.class), any(Long.class),
+        any(ByteBuf.class), any(ChannelPromise.class));
+    channel().checkException();
+    assertTrue(channel().isOpen());
+
+    channelRead(pingFrame(/*ack=*/ true , NettyServerHandler.GRACEFUL_SHUTDOWN_PING));
+    verifyWrite().writeGoAway(eq(ctx()), eq(0), eq(Http2Error.NO_ERROR.code()),
+        isA(ByteBuf.class), any(ChannelPromise.class));
     assertFalse(channel().isOpen());
   }
 
@@ -371,7 +432,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     verifyWrite().writeSettings(
         any(ChannelHandlerContext.class), captor.capture(), any(ChannelPromise.class));
 
-    assertEquals(maxConcurrentStreams, captor.getValue().maxConcurrentStreams().intValue());
+    assertEquals(maxConcurrentStreams, captor.getValue().maxConcurrentStreams().longValue());
   }
 
   @Test
@@ -383,7 +444,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     verifyWrite().writeSettings(
         any(ChannelHandlerContext.class), captor.capture(), any(ChannelPromise.class));
 
-    assertEquals(maxHeaderListSize, captor.getValue().maxHeaderListSize().intValue());
+    assertEquals(maxHeaderListSize, captor.getValue().maxHeaderListSize().longValue());
   }
 
   @Test
@@ -422,10 +483,16 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         .set(InternalStatus.CODE_KEY.name(), String.valueOf(Code.INTERNAL.value()))
         .set(InternalStatus.MESSAGE_KEY.name(), "Content-Type 'application/bad' is not supported")
         .status("" + 415)
-        .set(CONTENT_TYPE_HEADER, "text/plain; encoding=utf-8");
+        .set(CONTENT_TYPE_HEADER, "text/plain; charset=utf-8");
 
-    verifyWrite().writeHeaders(eq(ctx()), eq(STREAM_ID), eq(responseHeaders), eq(0),
-        eq(DEFAULT_PRIORITY_WEIGHT), eq(false), eq(0), eq(false), any(ChannelPromise.class));
+    verifyWrite()
+        .writeHeaders(
+            eq(ctx()),
+            eq(STREAM_ID),
+            eq(responseHeaders),
+            eq(0),
+            eq(false),
+            any(ChannelPromise.class));
   }
 
   @Test
@@ -441,10 +508,16 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         .set(InternalStatus.CODE_KEY.name(), String.valueOf(Code.INTERNAL.value()))
         .set(InternalStatus.MESSAGE_KEY.name(), "Method 'FAKE' is not supported")
         .status("" + 405)
-        .set(CONTENT_TYPE_HEADER, "text/plain; encoding=utf-8");
+        .set(CONTENT_TYPE_HEADER, "text/plain; charset=utf-8");
 
-    verifyWrite().writeHeaders(eq(ctx()), eq(STREAM_ID), eq(responseHeaders), eq(0),
-        eq(DEFAULT_PRIORITY_WEIGHT), eq(false), eq(0), eq(false), any(ChannelPromise.class));
+    verifyWrite()
+        .writeHeaders(
+            eq(ctx()),
+            eq(STREAM_ID),
+            eq(responseHeaders),
+            eq(0),
+            eq(false),
+            any(ChannelPromise.class));
   }
 
   @Test
@@ -459,10 +532,16 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         .set(InternalStatus.CODE_KEY.name(), String.valueOf(Code.UNIMPLEMENTED.value()))
         .set(InternalStatus.MESSAGE_KEY.name(), "Expected path but is missing")
         .status("" + 404)
-        .set(CONTENT_TYPE_HEADER, "text/plain; encoding=utf-8");
+        .set(CONTENT_TYPE_HEADER, "text/plain; charset=utf-8");
 
-    verifyWrite().writeHeaders(eq(ctx()), eq(STREAM_ID), eq(responseHeaders), eq(0),
-        eq(DEFAULT_PRIORITY_WEIGHT), eq(false), eq(0), eq(false), any(ChannelPromise.class));
+    verifyWrite()
+        .writeHeaders(
+            eq(ctx()),
+            eq(STREAM_ID),
+            eq(responseHeaders),
+            eq(0),
+            eq(false),
+            any(ChannelPromise.class));
   }
 
   @Test
@@ -478,10 +557,16 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         .set(InternalStatus.CODE_KEY.name(), String.valueOf(Code.UNIMPLEMENTED.value()))
         .set(InternalStatus.MESSAGE_KEY.name(), "Expected path to start with /: foo/bar")
         .status("" + 404)
-        .set(CONTENT_TYPE_HEADER, "text/plain; encoding=utf-8");
+        .set(CONTENT_TYPE_HEADER, "text/plain; charset=utf-8");
 
-    verifyWrite().writeHeaders(eq(ctx()), eq(STREAM_ID), eq(responseHeaders), eq(0),
-        eq(DEFAULT_PRIORITY_WEIGHT), eq(false), eq(0), eq(false), any(ChannelPromise.class));
+    verifyWrite()
+        .writeHeaders(
+            eq(ctx()),
+            eq(STREAM_ID),
+            eq(responseHeaders),
+            eq(0),
+            eq(false),
+            any(ChannelPromise.class));
   }
 
   @Test
@@ -501,6 +586,96 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     verify(transportListener).streamCreated(streamCaptor.capture(), methodCaptor.capture(),
         any(Metadata.class));
     stream = streamCaptor.getValue();
+  }
+
+  @Test
+  public void headersWithConnectionHeaderShouldFail() throws Exception {
+    manualSetUp();
+    Http2Headers headers = new DefaultHttp2Headers()
+        .method(HTTP_METHOD)
+        .set(CONTENT_TYPE_HEADER, CONTENT_TYPE_GRPC)
+        .set(AsciiString.of("connection"), CONTENT_TYPE_GRPC)
+        .path(new AsciiString("/foo/bar"));
+    ByteBuf headersFrame = headersFrame(STREAM_ID, headers);
+    channelRead(headersFrame);
+
+    verifyWrite()
+        .writeRstStream(
+            eq(ctx()),
+            eq(STREAM_ID),
+            eq(Http2Error.PROTOCOL_ERROR.code()),
+            any(ChannelPromise.class));
+  }
+
+  @Test
+  public void headersWithMultipleHostsShouldFail() throws Exception {
+    manualSetUp();
+    Http2Headers headers = new DefaultHttp2Headers()
+        .method(HTTP_METHOD)
+        .set(CONTENT_TYPE_HEADER, CONTENT_TYPE_GRPC)
+        .add(AsciiString.of("host"), AsciiString.of("example.com"))
+        .add(AsciiString.of("host"), AsciiString.of("bad.com"))
+        .path(new AsciiString("/foo/bar"));
+    ByteBuf headersFrame = headersFrame(STREAM_ID, headers);
+    channelRead(headersFrame);
+    Http2Headers responseHeaders = new DefaultHttp2Headers()
+        .set(InternalStatus.CODE_KEY.name(), String.valueOf(Code.INTERNAL.value()))
+        .set(InternalStatus.MESSAGE_KEY.name(), "Multiple host headers")
+        .status("" + 400)
+        .set(CONTENT_TYPE_HEADER, "text/plain; charset=utf-8");
+
+    verifyWrite()
+        .writeHeaders(
+            eq(ctx()),
+            eq(STREAM_ID),
+            eq(responseHeaders),
+            eq(0),
+            eq(false),
+            any(ChannelPromise.class));
+  }
+
+  @Test
+  public void headersWithAuthorityAndHostUsesAuthority() throws Exception {
+    manualSetUp();
+    Http2Headers headers = new DefaultHttp2Headers()
+        .method(HTTP_METHOD)
+        .authority("example.com")
+        .set(CONTENT_TYPE_HEADER, CONTENT_TYPE_GRPC)
+        .add(AsciiString.of("host"), AsciiString.of("bad.com"))
+        .path(new AsciiString("/foo/bar"));
+    ByteBuf headersFrame = headersFrame(STREAM_ID, headers);
+    channelRead(headersFrame);
+    Metadata.Key<String> hostKey = Metadata.Key.of("host", Metadata.ASCII_STRING_MARSHALLER);
+
+    ArgumentCaptor<NettyServerStream> streamCaptor =
+        ArgumentCaptor.forClass(NettyServerStream.class);
+    ArgumentCaptor<Metadata> metadataCaptor = ArgumentCaptor.forClass(Metadata.class);
+    verify(transportListener).streamCreated(streamCaptor.capture(), eq("foo/bar"),
+        metadataCaptor.capture());
+    Truth.assertThat(streamCaptor.getValue().getAuthority()).isEqualTo("example.com");
+    Truth.assertThat(metadataCaptor.getValue().get(hostKey)).isNull();
+  }
+
+  @Test
+  public void headersWithOnlyHostBecomesAuthority() throws Exception {
+    manualSetUp();
+    // No authority header
+    Http2Headers headers = new DefaultHttp2Headers()
+        .method(HTTP_METHOD)
+        .set(CONTENT_TYPE_HEADER, CONTENT_TYPE_GRPC)
+        .add(AsciiString.of("host"), AsciiString.of("example.com"))
+        .path(new AsciiString("/foo/bar"));
+    ByteBuf headersFrame = headersFrame(STREAM_ID, headers);
+    channelRead(headersFrame);
+    Metadata.Key<String> hostKey = Metadata.Key.of("host", Metadata.ASCII_STRING_MARSHALLER);
+
+    ArgumentCaptor<NettyServerStream> streamCaptor =
+        ArgumentCaptor.forClass(NettyServerStream.class);
+    ArgumentCaptor<Metadata> metadataCaptor = ArgumentCaptor.forClass(Metadata.class);
+    verify(transportListener).streamCreated(streamCaptor.capture(), eq("foo/bar"),
+        metadataCaptor.capture());
+    Truth.assertThat(streamCaptor.getValue().getAuthority()).isEqualTo("example.com");
+    Truth.assertThat(metadataCaptor.getValue().get(hostKey)).isNull();
   }
 
   @Test
@@ -599,7 +774,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
 
     fakeClock().forwardNanos(keepAliveTimeoutInNanos);
 
-    assertTrue(!channel().isOpen());
+    assertFalse(channel().isOpen());
   }
 
   @Test
@@ -690,9 +865,13 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     fakeClock().forwardTime(20, TimeUnit.MINUTES);
 
     // GO_AWAY not sent yet
-    verifyWrite(never()).writeGoAway(
-        any(ChannelHandlerContext.class), any(Integer.class), any(Long.class), any(ByteBuf.class),
-        any(ChannelPromise.class));
+    verifyWrite(never())
+        .writeGoAway(
+            any(ChannelHandlerContext.class),
+            anyInt(),
+            anyLong(),
+            any(ByteBuf.class),
+            any(ChannelPromise.class));
     assertTrue(channel().isOpen());
   }
 
@@ -728,7 +907,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         eq(ctx()), eq(0), eq(Http2Error.NO_ERROR.code()), any(ByteBuf.class),
         any(ChannelPromise.class));
     // channel closed
-    assertTrue(!channel().isOpen());
+    assertFalse(channel().isOpen());
   }
 
   @Test
@@ -758,7 +937,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         eq(ctx()), eq(0), eq(Http2Error.NO_ERROR.code()), any(ByteBuf.class),
         any(ChannelPromise.class));
     // channel closed
-    assertTrue(!channel().isOpen());
+    assertFalse(channel().isOpen());
   }
 
   @Test
@@ -770,9 +949,13 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     fakeClock().forwardNanos(maxConnectionIdleInNanos);
 
     // GO_AWAY not sent when active
-    verifyWrite(never()).writeGoAway(
-        any(ChannelHandlerContext.class), any(Integer.class), any(Long.class), any(ByteBuf.class),
-        any(ChannelPromise.class));
+    verifyWrite(never())
+        .writeGoAway(
+            any(ChannelHandlerContext.class),
+            anyInt(),
+            anyLong(),
+            any(ByteBuf.class),
+            any(ChannelPromise.class));
     assertTrue(channel().isOpen());
 
     channelRead(rstStreamFrame(STREAM_ID, (int) Http2Error.CANCEL.code()));
@@ -798,7 +981,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         eq(ctx()), eq(STREAM_ID), eq(Http2Error.NO_ERROR.code()), any(ByteBuf.class),
         any(ChannelPromise.class));
     // channel closed
-    assertTrue(!channel().isOpen());
+    assertFalse(channel().isOpen());
   }
 
   @Test
@@ -810,9 +993,13 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     fakeClock().forwardNanos(maxConnectionIdleInNanos);
 
     // GO_AWAY not sent when active
-    verifyWrite(never()).writeGoAway(
-        any(ChannelHandlerContext.class), any(Integer.class), any(Long.class), any(ByteBuf.class),
-        any(ChannelPromise.class));
+    verifyWrite(never())
+        .writeGoAway(
+            any(ChannelHandlerContext.class),
+            anyInt(),
+            anyLong(),
+            any(ByteBuf.class),
+            any(ChannelPromise.class));
     assertTrue(channel().isOpen());
 
     channelRead(rstStreamFrame(STREAM_ID, (int) Http2Error.CANCEL.code()));
@@ -838,7 +1025,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         eq(ctx()), eq(STREAM_ID), eq(Http2Error.NO_ERROR.code()), any(ByteBuf.class),
         any(ChannelPromise.class));
     // channel closed
-    assertTrue(!channel().isOpen());
+    assertFalse(channel().isOpen());
   }
 
   @Test
@@ -849,9 +1036,13 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     fakeClock().forwardTime(20, TimeUnit.MINUTES);
 
     // GO_AWAY not sent yet
-    verifyWrite(never()).writeGoAway(
-        any(ChannelHandlerContext.class), any(Integer.class), any(Long.class), any(ByteBuf.class),
-        any(ChannelPromise.class));
+    verifyWrite(never())
+        .writeGoAway(
+            any(ChannelHandlerContext.class),
+            anyInt(),
+            anyLong(),
+            any(ByteBuf.class),
+            any(ChannelPromise.class));
     assertTrue(channel().isOpen());
   }
 
@@ -888,7 +1079,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         eq(ctx()), eq(0), eq(Http2Error.NO_ERROR.code()), any(ByteBuf.class),
         any(ChannelPromise.class));
     // channel closed
-    assertTrue(!channel().isOpen());
+    assertFalse(channel().isOpen());
   }
 
   @Test
@@ -919,7 +1110,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         eq(ctx()), eq(0), eq(Http2Error.NO_ERROR.code()), any(ByteBuf.class),
         any(ChannelPromise.class));
     // channel closed
-    assertTrue(!channel().isOpen());
+    assertFalse(channel().isOpen());
   }
 
   @Test
@@ -987,7 +1178,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     fakeClock().forwardTime(2, TimeUnit.MILLISECONDS);
 
     // channel closed
-    assertTrue(!channel().isOpen());
+    assertFalse(channel().isOpen());
   }
 
   @Test
@@ -1027,7 +1218,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     fakeClock().forwardTime(2, TimeUnit.MILLISECONDS);
 
     // channel closed
-    assertTrue(!channel().isOpen());
+    assertFalse(channel().isOpen());
   }
 
   private void createStream() throws Exception {
@@ -1066,6 +1257,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         Arrays.asList(streamTracerFactory),
         transportTracer,
         maxConcurrentStreams,
+        autoFlowControl,
         flowControlWindow,
         maxHeaderListSize,
         DEFAULT_MAX_MESSAGE_SIZE,
@@ -1075,7 +1267,9 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
         maxConnectionAgeInNanos,
         maxConnectionAgeGraceInNanos,
         permitKeepAliveWithoutCalls,
-        permitKeepAliveTimeInNanos);
+        permitKeepAliveTimeInNanos,
+        Attributes.EMPTY,
+        fakeClock().getTicker());
   }
 
   @Override
@@ -1087,4 +1281,14 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
   protected void makeStream() throws Exception {
     createStream();
   }
+
+  @Override
+  protected AbstractStream stream() throws Exception {
+    if (stream == null) {
+      makeStream();
+    }
+
+    return stream;
+  }
+
 }
