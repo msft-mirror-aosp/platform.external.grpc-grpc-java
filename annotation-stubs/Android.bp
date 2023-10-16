@@ -40,15 +40,25 @@ java_library {
     ],
 }
 
-gensrcs {
-    name: "grpc-java-annotation-stubs-srcjar",
-    tool_files: [
+python_binary_host {
+    name: "gen_annotations",
+    srcs: [
         "gen_annotations.py",
     ],
+    version: {
+        py3: {
+            embedded_launcher: true,
+        },
+    },
+}
+
+gensrcs {
+    name: "grpc-java-annotation-stubs-srcjar",
     tools: [
         "soong_zip",
+        "gen_annotations",
     ],
-    cmd: "$(location gen_annotations.py) $(genDir)/java && " +
+    cmd: "$(location gen_annotations) $(genDir)/java && " +
          "$(location soong_zip) -jar -o $(out) -C $(genDir)/java -D $(genDir)/java",
     srcs: [
         // A dummy source file since Soong crashes otherwise.
