@@ -48,6 +48,7 @@ java_library_host {
         "grpc-java-core-util",
         "grpc-java-protobuf",
         "grpc-java-protobuf-lite",
+        "grpc-java-reflection",
         "grpc-java-stub",
     ],
 }
