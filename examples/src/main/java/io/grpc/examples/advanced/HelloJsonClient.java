@@ -20,14 +20,14 @@ import static io.grpc.stub.ClientCalls.blockingUnaryCall;
 
 import io.grpc.CallOptions;
 import io.grpc.Channel;
+import io.grpc.Grpc;
+import io.grpc.InsecureChannelCredentials;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.MethodDescriptor;
 import io.grpc.StatusRuntimeException;
 import io.grpc.examples.helloworld.GreeterGrpc;
 import io.grpc.examples.helloworld.HelloReply;
 import io.grpc.examples.helloworld.HelloRequest;
-import io.grpc.examples.helloworld.HelloWorldClient;
 import io.grpc.stub.AbstractStub;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -43,15 +43,14 @@ import java.util.logging.Logger;
  * https://groups.google.com/forum/#!forum/grpc-io
  */
 public final class HelloJsonClient {
-  private static final Logger logger = Logger.getLogger(HelloWorldClient.class.getName());
+  private static final Logger logger = Logger.getLogger(HelloJsonClient.class.getName());
 
   private final ManagedChannel channel;
   private final HelloJsonStub blockingStub;
 
   /** Construct client connecting to HelloWorld server at {@code host:port}. */
   public HelloJsonClient(String host, int port) {
-    channel = ManagedChannelBuilder.forAddress(host, port)
-        .usePlaintext()
+    channel = Grpc.newChannelBuilderForAddress(host, port, InsecureChannelCredentials.create())
         .build();
     blockingStub = new HelloJsonStub(channel);
   }
@@ -79,12 +78,13 @@ public final class HelloJsonClient {
    * greeting.
    */
   public static void main(String[] args) throws Exception {
+    // Access a service running on the local machine on port 50051
     HelloJsonClient client = new HelloJsonClient("localhost", 50051);
     try {
-      /* Access a service running on the local machine on port 50051 */
       String user = "world";
+      // Use the arg as the name to greet if provided
       if (args.length > 0) {
-        user = args[0]; /* Use the arg as the name to greet if provided */
+        user = args[0];
       }
       client.greet(user);
     } finally {

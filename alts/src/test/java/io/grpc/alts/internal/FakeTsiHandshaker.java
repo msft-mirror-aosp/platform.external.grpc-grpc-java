@@ -19,7 +19,9 @@ package io.grpc.alts.internal;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.base.Preconditions;
+import io.grpc.ChannelLogger;
 import io.grpc.alts.internal.TsiPeer.Property;
+import io.grpc.internal.TestUtils.NoopChannelLogger;
 import io.netty.buffer.ByteBufAllocator;
 import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
@@ -37,7 +39,7 @@ public class FakeTsiHandshaker implements TsiHandshaker {
   private static final TsiHandshakerFactory clientHandshakerFactory =
       new TsiHandshakerFactory() {
         @Override
-        public TsiHandshaker newHandshaker(String authority) {
+        public TsiHandshaker newHandshaker(String authority, ChannelLogger logger) {
           return new FakeTsiHandshaker(true);
         }
       };
@@ -45,7 +47,7 @@ public class FakeTsiHandshaker implements TsiHandshaker {
   private static final TsiHandshakerFactory serverHandshakerFactory =
       new TsiHandshakerFactory() {
         @Override
-        public TsiHandshaker newHandshaker(String authority) {
+        public TsiHandshaker newHandshaker(String authority, ChannelLogger logger) {
           return new FakeTsiHandshaker(false);
         }
       };
@@ -83,11 +85,13 @@ public class FakeTsiHandshaker implements TsiHandshaker {
   }
 
   public static TsiHandshaker newFakeHandshakerClient() {
-    return clientHandshakerFactory.newHandshaker(null);
+    NoopChannelLogger channelLogger = new NoopChannelLogger();
+    return clientHandshakerFactory.newHandshaker(null, channelLogger);
   }
 
   public static TsiHandshaker newFakeHandshakerServer() {
-    return serverHandshakerFactory.newHandshaker(null);
+    NoopChannelLogger channelLogger = new NoopChannelLogger();
+    return serverHandshakerFactory.newHandshaker(null, channelLogger);
   }
 
   protected FakeTsiHandshaker(boolean isClient) {
@@ -172,6 +176,7 @@ public class FakeTsiHandshaker implements TsiHandshaker {
       ByteBuffer messageBytes = frameParser.getRawFrame();
       int offset = AltsFraming.getFramingOverhead();
       int length = messageBytes.limit() - offset;
+      @SuppressWarnings("ByteBufferBackingArray") // ByteBuffer is created using allocate()
       String message = new String(messageBytes.array(), offset, length, UTF_8);
       logger.log(Level.FINE, "Read message: {0}", message);
 
@@ -209,7 +214,7 @@ public class FakeTsiHandshaker implements TsiHandshaker {
 
   @Override
   public Object extractPeerObject() {
-    return AltsAuthContext.getDefaultInstance();
+    return AltsInternalContext.getDefaultInstance();
   }
 
   @Override
@@ -223,6 +228,11 @@ public class FakeTsiHandshaker implements TsiHandshaker {
 
   @Override
   public TsiFrameProtector createFrameProtector(ByteBufAllocator alloc) {
-    return createFrameProtector(AltsTsiFrameProtector.getMaxAllowedFrameBytes(), alloc);
+    return createFrameProtector(AltsTsiFrameProtector.getMinFrameSize(), alloc);
+  }
+
+  @Override
+  public void close() {
+    // No-op
   }
 }

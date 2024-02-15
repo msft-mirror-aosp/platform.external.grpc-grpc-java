@@ -30,6 +30,8 @@ java_library {
         "src/main/java/**/*.java",
     ],
     libs: [
+        "error_prone_annotations",
+        "grpc-java-api",
         "grpc-java-context",
         "grpc-java-core",
         "guava",
@@ -43,5 +45,6 @@ java_library {
         "com.android.adservices",
         "com.android.devicelock",
         "com.android.extservices",
+        "//apex_available:platform",
     ],
 }

@@ -18,13 +18,18 @@ package io.grpc.testing.integration;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.MoreExecutors;
+import io.grpc.BindableService;
+import io.grpc.Grpc;
+import io.grpc.InsecureServerCredentials;
 import io.grpc.Server;
+import io.grpc.ServerCredentials;
 import io.grpc.ServerInterceptors;
-import io.grpc.alts.AltsServerBuilder;
-import io.grpc.internal.testing.TestUtils;
-import io.grpc.netty.GrpcSslContexts;
-import io.grpc.netty.NettyServerBuilder;
-import io.netty.handler.ssl.SslContext;
+import io.grpc.TlsServerCredentials;
+import io.grpc.alts.AltsServerCredentials;
+import io.grpc.services.MetricRecorder;
+import io.grpc.testing.TlsTesting;
+import io.grpc.xds.orca.OrcaMetricReportingServerInterceptor;
+import io.grpc.xds.orca.OrcaServiceImpl;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -33,8 +38,6 @@ import java.util.concurrent.TimeUnit;
 public class TestServiceServer {
   /** The main application allowing this server to be launched from the command line. */
   public static void main(String[] args) throws Exception {
-    // Let Netty use Conscrypt if it is available.
-    TestUtils.installConscryptIfAvailable();
     final TestServiceServer server = new TestServiceServer();
     server.parseArgs(args);
     if (server.useTls) {
@@ -48,6 +51,7 @@ public class TestServiceServer {
         .addShutdownHook(
             new Thread() {
               @Override
+              @SuppressWarnings("CatchAndPrintStackTrace")
               public void run() {
                 try {
                   System.out.println("Shutting down");
@@ -68,6 +72,7 @@ public class TestServiceServer {
 
   private ScheduledExecutorService executor;
   private Server server;
+  private int localHandshakerPort = -1;
 
   @VisibleForTesting
   void parseArgs(String[] args) {
@@ -96,6 +101,8 @@ public class TestServiceServer {
         useTls = Boolean.parseBoolean(value);
       } else if ("use_alts".equals(key)) {
         useAlts = Boolean.parseBoolean(value);
+      } else if ("local_handshaker_port".equals(key)) {
+        localHandshakerPort = Integer.parseInt(value);
       } else if ("grpc_version".equals(key)) {
         if (!"2".equals(value)) {
           System.err.println("Only grpc version 2 is supported");
@@ -120,6 +127,9 @@ public class TestServiceServer {
               + "\n  --use_tls=true|false  Whether to use TLS. Default " + s.useTls
               + "\n  --use_alts=true|false Whether to use ALTS. Enable ALTS will disable TLS."
               + "\n                        Default " + s.useAlts
+              + "\n  --local_handshaker_port=PORT"
+              + "\n                        Use local ALTS handshaker service on the specified port "
+              + "\n                        for testing. Only effective when --use_alts=true."
       );
       System.exit(1);
     }
@@ -128,32 +138,33 @@ public class TestServiceServer {
   @VisibleForTesting
   void start() throws Exception {
     executor = Executors.newSingleThreadScheduledExecutor();
-    SslContext sslContext = null;
+    ServerCredentials serverCreds;
     if (useAlts) {
-      server =
-          AltsServerBuilder.forPort(port)
-              .addService(
-                  ServerInterceptors.intercept(
-                      new TestServiceImpl(executor), TestServiceImpl.interceptors()))
-              .build()
-              .start();
-    } else {
-      if (useTls) {
-        sslContext =
-            GrpcSslContexts.forServer(
-                    TestUtils.loadCert("server1.pem"), TestUtils.loadCert("server1.key"))
-                .build();
+      if (localHandshakerPort > -1) {
+        serverCreds = AltsServerCredentials.newBuilder()
+            .enableUntrustedAltsForTesting()
+            .setHandshakerAddressForTesting("localhost:" + localHandshakerPort).build();
+      } else {
+        serverCreds = AltsServerCredentials.create();
       }
-      server =
-          NettyServerBuilder.forPort(port)
-              .sslContext(sslContext)
-              .maxInboundMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
-              .addService(
-                  ServerInterceptors.intercept(
-                      new TestServiceImpl(executor), TestServiceImpl.interceptors()))
-              .build()
-              .start();
+    } else if (useTls) {
+      serverCreds = TlsServerCredentials.create(
+          TlsTesting.loadCert("server1.pem"), TlsTesting.loadCert("server1.key"));
+    } else {
+      serverCreds = InsecureServerCredentials.create();
     }
+    MetricRecorder metricRecorder = MetricRecorder.newInstance();
+    BindableService orcaOobService =
+        OrcaServiceImpl.createService(executor, metricRecorder, 1, TimeUnit.SECONDS);
+    server = Grpc.newServerBuilderForPort(port, serverCreds)
+        .maxInboundMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
+        .addService(
+            ServerInterceptors.intercept(
+                new TestServiceImpl(executor, metricRecorder), TestServiceImpl.interceptors()))
+        .addService(orcaOobService)
+        .intercept(OrcaMetricReportingServerInterceptor.create(metricRecorder))
+        .build()
+        .start();
   }
 
   @VisibleForTesting
