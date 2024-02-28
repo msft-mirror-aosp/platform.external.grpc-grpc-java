@@ -36,4 +36,9 @@ java_library_host {
     ],
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
