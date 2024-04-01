@@ -38,6 +38,11 @@ java_library_host {
         "guava",
         "perfmark-api-lib",
     ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 java_library {
