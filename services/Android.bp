@@ -30,6 +30,11 @@ java_library_static {
     visibility: ["//visibility:private"],
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 java_library_host {
@@ -60,4 +65,9 @@ java_library_host {
     ],
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
