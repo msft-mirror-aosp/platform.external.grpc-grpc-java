@@ -44,4 +44,9 @@ java_library {
         "com.android.extservices",
         "//apex_available:platform",
     ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
