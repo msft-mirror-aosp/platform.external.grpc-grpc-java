@@ -35,4 +35,9 @@ java_library {
             "com.android.devicelock",
             "com.android.extservices",
     ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
