@@ -1,0 +1,29 @@
+java_library_host {
+    name: "netty-unshaded-1.56.0",
+    defaults: ["grpc-java-default-visibility"],
+    static_libs: ["grpc-netty-shaded-1.56.0-jar"],
+    jarjar_rules: "netty-unshaded.txt",
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
+}
+
+java_library_host {
+    name: "grpc-java-netty",
+    srcs: ["src/main/java/**/*.java"],
+    libs: [
+        "netty-unshaded-1.56.0",
+        "grpc-java-api",
+        "grpc-java-core",
+        "grpc-java-core-internal",
+        "guava",
+        "perfmark",
+    ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
+}
