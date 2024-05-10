@@ -19,13 +19,20 @@ package io.grpc.internal;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.MoreObjects;
+import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Stopwatch;
 import com.google.common.base.Throwables;
 import com.google.common.base.Verify;
+import com.google.common.base.VerifyException;
 import io.grpc.Attributes;
 import io.grpc.EquivalentAddressGroup;
 import io.grpc.NameResolver;
+import io.grpc.ProxiedSocketAddress;
+import io.grpc.ProxyDetector;
 import io.grpc.Status;
+import io.grpc.SynchronizationContext;
 import io.grpc.internal.SharedResourceHolder.Resource;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
@@ -39,25 +46,24 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Random;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.Nullable;
-import javax.annotation.concurrent.GuardedBy;
 
 /**
  * A DNS-based {@link NameResolver}.
  *
  * <p>Each {@code A} or {@code AAAA} record emits an {@link EquivalentAddressGroup} in the list
- * passed to {@link NameResolver.Listener#onAddresses(List, Attributes)}
+ * passed to {@link NameResolver.Listener2#onResult(ResolutionResult)}.
  *
  * @see DnsNameResolverProvider
  */
-final class DnsNameResolver extends NameResolver {
+public class DnsNameResolver extends NameResolver {
 
   private static final Logger logger = Logger.getLogger(DnsNameResolver.class.getName());
 
@@ -67,10 +73,10 @@ final class DnsNameResolver extends NameResolver {
   private static final String SERVICE_CONFIG_CHOICE_SERVICE_CONFIG_KEY = "serviceConfig";
 
   // From https://github.com/grpc/proposal/blob/master/A2-service-configs-in-dns.md
-  static final String SERVICE_CONFIG_PREFIX = "_grpc_config=";
+  static final String SERVICE_CONFIG_PREFIX = "grpc_config=";
   private static final Set<String> SERVICE_CONFIG_CHOICE_KEYS =
       Collections.unmodifiableSet(
-          new HashSet<String>(
+          new HashSet<>(
               Arrays.asList(
                   SERVICE_CONFIG_CHOICE_CLIENT_LANGUAGE_KEY,
                   SERVICE_CONFIG_CHOICE_PERCENTAGE_KEY,
@@ -79,27 +85,35 @@ final class DnsNameResolver extends NameResolver {
 
   // From https://github.com/grpc/proposal/blob/master/A2-service-configs-in-dns.md
   private static final String SERVICE_CONFIG_NAME_PREFIX = "_grpc_config.";
-  // From https://github.com/grpc/proposal/blob/master/A5-grpclb-in-dns.md
-  private static final String GRPCLB_NAME_PREFIX = "_grpclb._tcp.";
 
   private static final String JNDI_PROPERTY =
       System.getProperty("io.grpc.internal.DnsNameResolverProvider.enable_jndi", "true");
   private static final String JNDI_LOCALHOST_PROPERTY =
       System.getProperty("io.grpc.internal.DnsNameResolverProvider.enable_jndi_localhost", "false");
-  private static final String JNDI_SRV_PROPERTY =
-      System.getProperty("io.grpc.internal.DnsNameResolverProvider.enable_grpclb", "false");
   private static final String JNDI_TXT_PROPERTY =
       System.getProperty("io.grpc.internal.DnsNameResolverProvider.enable_service_config", "false");
+
+  /**
+   * Java networking system properties name for caching DNS result.
+   *
+   * <p>Default value is -1 (cache forever) if security manager is installed. If security manager is
+   * not installed, the ttl value is {@code null} which falls back to {@link
+   * #DEFAULT_NETWORK_CACHE_TTL_SECONDS gRPC default value}.
+   *
+   * <p>For android, gRPC doesn't attempt to cache; this property value will be ignored.
+   */
+  @VisibleForTesting
+  static final String NETWORKADDRESS_CACHE_TTL_PROPERTY = "networkaddress.cache.ttl";
+  /** Default DNS cache duration if network cache ttl value is not specified ({@code null}). */
+  @VisibleForTesting
+  static final long DEFAULT_NETWORK_CACHE_TTL_SECONDS = 30;
 
   @VisibleForTesting
   static boolean enableJndi = Boolean.parseBoolean(JNDI_PROPERTY);
   @VisibleForTesting
   static boolean enableJndiLocalhost = Boolean.parseBoolean(JNDI_LOCALHOST_PROPERTY);
   @VisibleForTesting
-  static boolean enableSrv = Boolean.parseBoolean(JNDI_SRV_PROPERTY);
-  @VisibleForTesting
-  static boolean enableTxt = Boolean.parseBoolean(JNDI_TXT_PROPERTY);
-
+  protected static boolean enableTxt = Boolean.parseBoolean(JNDI_TXT_PROPERTY);
 
   private static final ResourceResolverFactory resourceResolverFactory =
       getResourceResolverFactory(DnsNameResolver.class.getClassLoader());
@@ -112,26 +126,42 @@ final class DnsNameResolver extends NameResolver {
 
   private final Random random = new Random();
 
-  private volatile AddressResolver addressResolver = JdkAddressResolver.INSTANCE;
-  private final AtomicReference<ResourceResolver> resourceResolver =
-      new AtomicReference<ResourceResolver>();
+  protected volatile AddressResolver addressResolver = JdkAddressResolver.INSTANCE;
+  private final AtomicReference<ResourceResolver> resourceResolver = new AtomicReference<>();
 
   private final String authority;
   private final String host;
   private final int port;
-  private final Resource<ExecutorService> executorResource;
-  @GuardedBy("this")
-  private boolean shutdown;
-  @GuardedBy("this")
-  private ExecutorService executor;
-  @GuardedBy("this")
-  private boolean resolving;
-  @GuardedBy("this")
-  private Listener listener;
 
-  DnsNameResolver(@Nullable String nsAuthority, String name, Attributes params,
-      Resource<ExecutorService> executorResource,
-      ProxyDetector proxyDetector) {
+  /** Executor that will be used if an Executor is not provide via {@link NameResolver.Args}. */
+  private final Resource<Executor> executorResource;
+  private final long cacheTtlNanos;
+  private final SynchronizationContext syncContext;
+
+  // Following fields must be accessed from syncContext
+  private final Stopwatch stopwatch;
+  protected boolean resolved;
+  private boolean shutdown;
+  private Executor executor;
+
+  /** True if using an executor resource that should be released after use. */
+  private final boolean usingExecutorResource;
+  private final ServiceConfigParser serviceConfigParser;
+
+  private boolean resolving;
+
+  // The field must be accessed from syncContext, although the methods on an Listener2 can be called
+  // from any thread.
+  private NameResolver.Listener2 listener;
+
+  protected DnsNameResolver(
+      @Nullable String nsAuthority,
+      String name,
+      Args args,
+      Resource<Executor> executorResource,
+      Stopwatch stopwatch,
+      boolean isAndroid) {
+    checkNotNull(args, "args");
     // TODO: if a DNS server is provided as nsAuthority, use it.
     // https://www.captechconsulting.com/blogs/accessing-the-dusty-corners-of-dns-with-java
     this.executorResource = executorResource;
@@ -143,136 +173,235 @@ final class DnsNameResolver extends NameResolver {
         "nameUri (%s) doesn't have an authority", nameUri);
     host = nameUri.getHost();
     if (nameUri.getPort() == -1) {
-      Integer defaultPort = params.get(NameResolver.Factory.PARAMS_DEFAULT_PORT);
-      if (defaultPort != null) {
-        port = defaultPort;
-      } else {
-        throw new IllegalArgumentException(
-            "name '" + name + "' doesn't contain a port, and default port is not set in params");
-      }
+      port = args.getDefaultPort();
     } else {
       port = nameUri.getPort();
     }
-    this.proxyDetector = proxyDetector;
+    this.proxyDetector = checkNotNull(args.getProxyDetector(), "proxyDetector");
+    this.cacheTtlNanos = getNetworkAddressCacheTtlNanos(isAndroid);
+    this.stopwatch = checkNotNull(stopwatch, "stopwatch");
+    this.syncContext = checkNotNull(args.getSynchronizationContext(), "syncContext");
+    this.executor = args.getOffloadExecutor();
+    this.usingExecutorResource = executor == null;
+    this.serviceConfigParser = checkNotNull(args.getServiceConfigParser(), "serviceConfigParser");
   }
 
   @Override
-  public final String getServiceAuthority() {
+  public String getServiceAuthority() {
     return authority;
   }
 
+  @VisibleForTesting
+  protected String getHost() {
+    return host;
+  }
+
   @Override
-  public final synchronized void start(Listener listener) {
+  public void start(Listener2 listener) {
     Preconditions.checkState(this.listener == null, "already started");
-    executor = SharedResourceHolder.get(executorResource);
-    this.listener = Preconditions.checkNotNull(listener, "listener");
+    if (usingExecutorResource) {
+      executor = SharedResourceHolder.get(executorResource);
+    }
+    this.listener = checkNotNull(listener, "listener");
     resolve();
   }
 
   @Override
-  public final synchronized void refresh() {
+  public void refresh() {
     Preconditions.checkState(listener != null, "not started");
     resolve();
   }
 
-  private final Runnable resolutionRunnable = new Runnable() {
-      @Override
-      public void run() {
-        Listener savedListener;
-        synchronized (DnsNameResolver.this) {
-          if (shutdown) {
-            return;
-          }
-          savedListener = listener;
-          resolving = true;
+  private List<EquivalentAddressGroup> resolveAddresses() {
+    List<? extends InetAddress> addresses;
+    Exception addressesException = null;
+    try {
+      addresses = addressResolver.resolveAddress(host);
+    } catch (Exception e) {
+      addressesException = e;
+      Throwables.throwIfUnchecked(e);
+      throw new RuntimeException(e);
+    } finally {
+      if (addressesException != null) {
+        logger.log(Level.FINE, "Address resolution failure", addressesException);
+      }
+    }
+    // Each address forms an EAG
+    List<EquivalentAddressGroup> servers = new ArrayList<>(addresses.size());
+    for (InetAddress inetAddr : addresses) {
+      servers.add(new EquivalentAddressGroup(new InetSocketAddress(inetAddr, port)));
+    }
+    return Collections.unmodifiableList(servers);
+  }
+
+  @Nullable
+  private ConfigOrError resolveServiceConfig() {
+    List<String> txtRecords = Collections.emptyList();
+    ResourceResolver resourceResolver = getResourceResolver();
+    if (resourceResolver != null) {
+      try {
+        txtRecords = resourceResolver.resolveTxt(SERVICE_CONFIG_NAME_PREFIX + host);
+      } catch (Exception e) {
+        logger.log(Level.FINE, "ServiceConfig resolution failure", e);
+      }
+    }
+    if (!txtRecords.isEmpty()) {
+      ConfigOrError rawServiceConfig = parseServiceConfig(txtRecords, random, getLocalHostname());
+      if (rawServiceConfig != null) {
+        if (rawServiceConfig.getError() != null) {
+          return ConfigOrError.fromError(rawServiceConfig.getError());
         }
-        try {
-          InetSocketAddress destination = InetSocketAddress.createUnresolved(host, port);
-          ProxyParameters proxy;
-          try {
-            proxy = proxyDetector.proxyFor(destination);
-          } catch (IOException e) {
-            savedListener.onError(
-                Status.UNAVAILABLE.withDescription("Unable to resolve host " + host).withCause(e));
-            return;
-          }
-          if (proxy != null) {
-            EquivalentAddressGroup server =
-                new EquivalentAddressGroup(
-                    new ProxySocketAddress(destination, proxy));
-            savedListener.onAddresses(Collections.singletonList(server), Attributes.EMPTY);
-            return;
-          }
 
-          ResolutionResults resolutionResults;
-          try {
-            ResourceResolver resourceResolver = null;
-            if (shouldUseJndi(enableJndi, enableJndiLocalhost, host)) {
-              resourceResolver = getResourceResolver();
-            }
-            resolutionResults =
-                resolveAll(addressResolver, resourceResolver, enableSrv, enableTxt, host);
-          } catch (Exception e) {
-            savedListener.onError(
-                Status.UNAVAILABLE.withDescription("Unable to resolve host " + host).withCause(e));
+        @SuppressWarnings("unchecked")
+        Map<String, ?> verifiedRawServiceConfig = (Map<String, ?>) rawServiceConfig.getConfig();
+        return serviceConfigParser.parseServiceConfig(verifiedRawServiceConfig);
+      }
+    } else {
+      logger.log(Level.FINE, "No TXT records found for {0}", new Object[]{host});
+    }
+    return null;
+  }
+
+  @Nullable
+  private EquivalentAddressGroup detectProxy() throws IOException {
+    InetSocketAddress destination =
+        InetSocketAddress.createUnresolved(host, port);
+    ProxiedSocketAddress proxiedAddr = proxyDetector.proxyFor(destination);
+    if (proxiedAddr != null) {
+      return new EquivalentAddressGroup(proxiedAddr);
+    }
+    return null;
+  }
+
+  /**
+   * Main logic of name resolution.
+   */
+  protected InternalResolutionResult doResolve(boolean forceTxt) {
+    InternalResolutionResult result = new InternalResolutionResult();
+    try {
+      result.addresses = resolveAddresses();
+    } catch (Exception e) {
+      if (!forceTxt) {
+        result.error =
+            Status.UNAVAILABLE.withDescription("Unable to resolve host " + host).withCause(e);
+        return result;
+      }
+    }
+    if (enableTxt) {
+      result.config = resolveServiceConfig();
+    }
+    return result;
+  }
+
+  private final class Resolve implements Runnable {
+    private final Listener2 savedListener;
+
+    Resolve(Listener2 savedListener) {
+      this.savedListener = checkNotNull(savedListener, "savedListener");
+    }
+
+    @Override
+    public void run() {
+      if (logger.isLoggable(Level.FINER)) {
+        logger.finer("Attempting DNS resolution of " + host);
+      }
+      InternalResolutionResult result = null;
+      try {
+        EquivalentAddressGroup proxiedAddr = detectProxy();
+        ResolutionResult.Builder resolutionResultBuilder = ResolutionResult.newBuilder();
+        if (proxiedAddr != null) {
+          if (logger.isLoggable(Level.FINER)) {
+            logger.finer("Using proxy address " + proxiedAddr);
+          }
+          resolutionResultBuilder.setAddresses(Collections.singletonList(proxiedAddr));
+        } else {
+          result = doResolve(false);
+          if (result.error != null) {
+            savedListener.onError(result.error);
             return;
           }
-          // Each address forms an EAG
-          List<EquivalentAddressGroup> servers = new ArrayList<>();
-          for (InetAddress inetAddr : resolutionResults.addresses) {
-            servers.add(new EquivalentAddressGroup(new InetSocketAddress(inetAddr, port)));
+          if (result.addresses != null) {
+            resolutionResultBuilder.setAddresses(result.addresses);
           }
-          servers.addAll(resolutionResults.balancerAddresses);
-
-          Attributes.Builder attrs = Attributes.newBuilder();
-          if (!resolutionResults.txtRecords.isEmpty()) {
-            Map<String, Object> serviceConfig = null;
-            try {
-              for (Map<String, Object> possibleConfig :
-                  parseTxtResults(resolutionResults.txtRecords)) {
-                try {
-                  serviceConfig =
-                      maybeChooseServiceConfig(possibleConfig, random, getLocalHostname());
-                } catch (RuntimeException e) {
-                  logger.log(Level.WARNING, "Bad service config choice " + possibleConfig, e);
-                }
-                if (serviceConfig != null) {
-                  break;
-                }
+          if (result.config != null) {
+            resolutionResultBuilder.setServiceConfig(result.config);
+          }
+          if (result.attributes != null) {
+            resolutionResultBuilder.setAttributes(result.attributes);
+          }
+        }
+        savedListener.onResult(resolutionResultBuilder.build());
+      } catch (IOException e) {
+        savedListener.onError(
+            Status.UNAVAILABLE.withDescription("Unable to resolve host " + host).withCause(e));
+      } finally {
+        final boolean succeed = result != null && result.error == null;
+        syncContext.execute(new Runnable() {
+          @Override
+          public void run() {
+            if (succeed) {
+              resolved = true;
+              if (cacheTtlNanos > 0) {
+                stopwatch.reset().start();
               }
-            } catch (RuntimeException e) {
-              logger.log(Level.WARNING, "Can't parse service Configs", e);
             }
-            if (serviceConfig != null) {
-              attrs.set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig);
-            }
-          } else {
-            logger.log(Level.FINE, "No TXT records found for {0}", new Object[]{host});
-          }
-          savedListener.onAddresses(servers, attrs.build());
-        } finally {
-          synchronized (DnsNameResolver.this) {
             resolving = false;
           }
-        }
+        });
       }
-    };
+    }
+  }
 
-  @GuardedBy("this")
+  @Nullable
+  static ConfigOrError parseServiceConfig(
+      List<String> rawTxtRecords, Random random, String localHostname) {
+    List<Map<String, ?>> possibleServiceConfigChoices;
+    try {
+      possibleServiceConfigChoices = parseTxtResults(rawTxtRecords);
+    } catch (IOException | RuntimeException e) {
+      return ConfigOrError.fromError(
+          Status.UNKNOWN.withDescription("failed to parse TXT records").withCause(e));
+    }
+    Map<String, ?> possibleServiceConfig = null;
+    for (Map<String, ?> possibleServiceConfigChoice : possibleServiceConfigChoices) {
+      try {
+        possibleServiceConfig =
+            maybeChooseServiceConfig(possibleServiceConfigChoice, random, localHostname);
+      } catch (RuntimeException e) {
+        return ConfigOrError.fromError(
+            Status.UNKNOWN.withDescription("failed to pick service config choice").withCause(e));
+      }
+      if (possibleServiceConfig != null) {
+        break;
+      }
+    }
+    if (possibleServiceConfig == null) {
+      return null;
+    }
+    return ConfigOrError.fromConfig(possibleServiceConfig);
+  }
+
   private void resolve() {
-    if (resolving || shutdown) {
+    if (resolving || shutdown || !cacheRefreshRequired()) {
       return;
     }
-    executor.execute(resolutionRunnable);
+    resolving = true;
+    executor.execute(new Resolve(listener));
+  }
+
+  private boolean cacheRefreshRequired() {
+    return !resolved
+        || cacheTtlNanos == 0
+        || (cacheTtlNanos > 0 && stopwatch.elapsed(TimeUnit.NANOSECONDS) > cacheTtlNanos);
   }
 
   @Override
-  public final synchronized void shutdown() {
+  public void shutdown() {
     if (shutdown) {
       return;
     }
     shutdown = true;
-    if (executor != null) {
+    if (executor != null && usingExecutorResource) {
       executor = SharedResourceHolder.release(executorResource, executor);
     }
   }
@@ -281,127 +410,70 @@ final class DnsNameResolver extends NameResolver {
     return port;
   }
 
+  /**
+   * Parse TXT service config records as JSON.
+   *
+   * @throws IOException if one of the txt records contains improperly formatted JSON.
+   */
   @VisibleForTesting
-  static ResolutionResults resolveAll(
-      AddressResolver addressResolver,
-      @Nullable ResourceResolver resourceResolver,
-      boolean requestSrvRecords,
-      boolean requestTxtRecords,
-      String name) {
-    List<? extends InetAddress> addresses = Collections.emptyList();
-    Exception addressesException = null;
-    List<EquivalentAddressGroup> balancerAddresses = Collections.emptyList();
-    Exception balancerAddressesException = null;
-    List<String> txtRecords = Collections.emptyList();
-    Exception txtRecordsException = null;
-
-    try {
-      addresses = addressResolver.resolveAddress(name);
-    } catch (Exception e) {
-      addressesException = e;
-    }
-    if (resourceResolver != null) {
-      if (requestSrvRecords) {
-        try {
-          balancerAddresses =
-              resourceResolver.resolveSrv(addressResolver, GRPCLB_NAME_PREFIX + name);
-        } catch (Exception e) {
-          balancerAddressesException = e;
-        }
-      }
-      if (requestTxtRecords) {
-        boolean balancerLookupFailedOrNotAttempted =
-            !requestSrvRecords || balancerAddressesException != null;
-        boolean dontResolveTxt =
-            (addressesException != null) && balancerLookupFailedOrNotAttempted;
-        // Only do the TXT record lookup if one of the above address resolutions succeeded.
-        if (!dontResolveTxt) {
-          try {
-            txtRecords = resourceResolver.resolveTxt(SERVICE_CONFIG_NAME_PREFIX + name);
-          } catch (Exception e) {
-            txtRecordsException = e;
-          }
-        }
-      }
-    }
-    try {
-      if (addressesException != null
-          && (balancerAddressesException != null || balancerAddresses.isEmpty())) {
-        Throwables.throwIfUnchecked(addressesException);
-        throw new RuntimeException(addressesException);
-      }
-    } finally {
-      if (addressesException != null) {
-        logger.log(Level.FINE, "Address resolution failure", addressesException);
-      }
-      if (balancerAddressesException != null) {
-        logger.log(Level.FINE, "Balancer resolution failure", balancerAddressesException);
-      }
-      if (txtRecordsException != null) {
-        logger.log(Level.FINE, "ServiceConfig resolution failure", txtRecordsException);
-      }
-    }
-    return new ResolutionResults(addresses, txtRecords, balancerAddresses);
-  }
-
-  @SuppressWarnings("unchecked")
-  @VisibleForTesting
-  static List<Map<String, Object>> parseTxtResults(List<String> txtRecords) {
-    List<Map<String, Object>> serviceConfigs = new ArrayList<Map<String, Object>>();
+  static List<Map<String, ?>> parseTxtResults(List<String> txtRecords) throws IOException {
+    List<Map<String, ?>> possibleServiceConfigChoices = new ArrayList<>();
     for (String txtRecord : txtRecords) {
-      if (txtRecord.startsWith(SERVICE_CONFIG_PREFIX)) {
-        List<Map<String, Object>> choices;
-        try {
-          Object rawChoices = JsonParser.parse(txtRecord.substring(SERVICE_CONFIG_PREFIX.length()));
-          if (!(rawChoices instanceof List)) {
-            throw new IOException("wrong type " + rawChoices);
-          }
-          List<Object> listChoices = (List<Object>) rawChoices;
-          for (Object obj : listChoices) {
-            if (!(obj instanceof Map)) {
-              throw new IOException("wrong element type " + rawChoices);
-            }
-          }
-          choices = (List<Map<String, Object>>) (List<?>) listChoices;
-        } catch (IOException e) {
-          logger.log(Level.WARNING, "Bad service config: " + txtRecord, e);
-          continue;
-        }
-        serviceConfigs.addAll(choices);
-      } else {
+      if (!txtRecord.startsWith(SERVICE_CONFIG_PREFIX)) {
         logger.log(Level.FINE, "Ignoring non service config {0}", new Object[]{txtRecord});
+        continue;
       }
+      Object rawChoices = JsonParser.parse(txtRecord.substring(SERVICE_CONFIG_PREFIX.length()));
+      if (!(rawChoices instanceof List)) {
+        throw new ClassCastException("wrong type " + rawChoices);
+      }
+      List<?> listChoices = (List<?>) rawChoices;
+      possibleServiceConfigChoices.addAll(JsonUtil.checkObjectList(listChoices));
     }
-    return serviceConfigs;
+    return possibleServiceConfigChoices;
   }
 
   @Nullable
-  private static final Double getPercentageFromChoice(
-      Map<String, Object> serviceConfigChoice) {
-    if (!serviceConfigChoice.containsKey(SERVICE_CONFIG_CHOICE_PERCENTAGE_KEY)) {
-      return null;
-    }
-    return ServiceConfigUtil.getDouble(serviceConfigChoice, SERVICE_CONFIG_CHOICE_PERCENTAGE_KEY);
+  private static final Double getPercentageFromChoice(Map<String, ?> serviceConfigChoice) {
+    return JsonUtil.getNumberAsDouble(serviceConfigChoice, SERVICE_CONFIG_CHOICE_PERCENTAGE_KEY);
   }
 
   @Nullable
   private static final List<String> getClientLanguagesFromChoice(
-      Map<String, Object> serviceConfigChoice) {
-    if (!serviceConfigChoice.containsKey(SERVICE_CONFIG_CHOICE_CLIENT_LANGUAGE_KEY)) {
-      return null;
-    }
-    return ServiceConfigUtil.checkStringList(
-        ServiceConfigUtil.getList(serviceConfigChoice, SERVICE_CONFIG_CHOICE_CLIENT_LANGUAGE_KEY));
+      Map<String, ?> serviceConfigChoice) {
+    return JsonUtil.getListOfStrings(
+        serviceConfigChoice, SERVICE_CONFIG_CHOICE_CLIENT_LANGUAGE_KEY);
   }
 
   @Nullable
-  private static final List<String> getHostnamesFromChoice(
-      Map<String, Object> serviceConfigChoice) {
-    if (!serviceConfigChoice.containsKey(SERVICE_CONFIG_CHOICE_CLIENT_HOSTNAME_KEY)) {
-      return null;
+  private static final List<String> getHostnamesFromChoice(Map<String, ?> serviceConfigChoice) {
+    return JsonUtil.getListOfStrings(
+        serviceConfigChoice, SERVICE_CONFIG_CHOICE_CLIENT_HOSTNAME_KEY);
+  }
+
+  /**
+   * Returns value of network address cache ttl property if not Android environment. For android,
+   * DnsNameResolver does not cache the dns lookup result.
+   */
+  private static long getNetworkAddressCacheTtlNanos(boolean isAndroid) {
+    if (isAndroid) {
+      // on Android, ignore dns cache.
+      return 0;
     }
-    return ServiceConfigUtil.checkStringList(
-        ServiceConfigUtil.getList(serviceConfigChoice, SERVICE_CONFIG_CHOICE_CLIENT_HOSTNAME_KEY));
+
+    String cacheTtlPropertyValue = System.getProperty(NETWORKADDRESS_CACHE_TTL_PROPERTY);
+    long cacheTtl = DEFAULT_NETWORK_CACHE_TTL_SECONDS;
+    if (cacheTtlPropertyValue != null) {
+      try {
+        cacheTtl = Long.parseLong(cacheTtlPropertyValue);
+      } catch (NumberFormatException e) {
+        logger.log(
+            Level.WARNING,
+            "Property({0}) valid is not valid number format({1}), fall back to default({2})",
+            new Object[] {NETWORKADDRESS_CACHE_TTL_PROPERTY, cacheTtlPropertyValue, cacheTtl});
+      }
+    }
+    return cacheTtl > 0 ? TimeUnit.SECONDS.toNanos(cacheTtl) : cacheTtl;
   }
 
   /**
@@ -413,11 +485,10 @@ final class DnsNameResolver extends NameResolver {
    * @return The service config object or {@code null} if this choice does not apply.
    */
   @Nullable
-  @SuppressWarnings("BetaApi") // Verify isn't all that beta
   @VisibleForTesting
-  static Map<String, Object> maybeChooseServiceConfig(
-      Map<String, Object> choice, Random random, String hostname) {
-    for (Entry<String, ?> entry : choice.entrySet()) {
+  static Map<String, ?> maybeChooseServiceConfig(
+      Map<String, ?> choice, Random random, String hostname) {
+    for (Map.Entry<String, ?> entry : choice.entrySet()) {
       Verify.verify(SERVICE_CONFIG_CHOICE_KEYS.contains(entry.getKey()), "Bad key: %s", entry);
     }
 
@@ -455,32 +526,75 @@ final class DnsNameResolver extends NameResolver {
         return null;
       }
     }
-    return ServiceConfigUtil.getObject(choice, SERVICE_CONFIG_CHOICE_SERVICE_CONFIG_KEY);
+    Map<String, ?> sc =
+        JsonUtil.getObject(choice, SERVICE_CONFIG_CHOICE_SERVICE_CONFIG_KEY);
+    if (sc == null) {
+      throw new VerifyException(String.format(
+          "key '%s' missing in '%s'", choice, SERVICE_CONFIG_CHOICE_SERVICE_CONFIG_KEY));
+    }
+    return sc;
   }
 
   /**
-   * Describes the results from a DNS query.
+   * Used as a DNS-based name resolver's internal representation of resolution result.
+   */
+  protected static final class InternalResolutionResult {
+    private Status error;
+    private List<EquivalentAddressGroup> addresses;
+    private ConfigOrError config;
+    public Attributes attributes;
+
+    private InternalResolutionResult() {}
+  }
+
+  /**
+   * Describes a parsed SRV record.
    */
   @VisibleForTesting
-  static final class ResolutionResults {
-    final List<? extends InetAddress> addresses;
-    final List<String> txtRecords;
-    final List<EquivalentAddressGroup> balancerAddresses;
+  public static final class SrvRecord {
+    public final String host;
+    public final int port;
 
-    ResolutionResults(
-        List<? extends InetAddress> addresses,
-        List<String> txtRecords,
-        List<EquivalentAddressGroup> balancerAddresses) {
-      this.addresses = Collections.unmodifiableList(checkNotNull(addresses, "addresses"));
-      this.txtRecords = Collections.unmodifiableList(checkNotNull(txtRecords, "txtRecords"));
-      this.balancerAddresses =
-          Collections.unmodifiableList(checkNotNull(balancerAddresses, "balancerAddresses"));
+    public SrvRecord(String host, int port) {
+      this.host = host;
+      this.port = port;
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hashCode(host, port);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (this == obj) {
+        return true;
+      }
+      if (obj == null || getClass() != obj.getClass()) {
+        return false;
+      }
+      SrvRecord that = (SrvRecord) obj;
+      return port == that.port && host.equals(that.host);
+    }
+
+    @Override
+    public String toString() {
+      return
+          MoreObjects.toStringHelper(this)
+              .add("host", host)
+              .add("port", port)
+              .toString();
     }
   }
 
   @VisibleForTesting
-  void setAddressResolver(AddressResolver addressResolver) {
+  protected void setAddressResolver(AddressResolver addressResolver) {
     this.addressResolver = addressResolver;
+  }
+
+  @VisibleForTesting
+  protected void setResourceResolver(ResourceResolver resourceResolver) {
+    this.resourceResolver.set(resourceResolver);
   }
 
   /**
@@ -505,7 +619,8 @@ final class DnsNameResolver extends NameResolver {
   /**
    * AddressResolver resolves a hostname into a list of addresses.
    */
-  interface AddressResolver {
+  @VisibleForTesting
+  public interface AddressResolver {
     List<InetAddress> resolveAddress(String host) throws Exception;
   }
 
@@ -521,15 +636,18 @@ final class DnsNameResolver extends NameResolver {
   /**
    * {@link ResourceResolver} is a Dns ResourceRecord resolver.
    */
-  interface ResourceResolver {
+  @VisibleForTesting
+  public interface ResourceResolver {
     List<String> resolveTxt(String host) throws Exception;
 
-    List<EquivalentAddressGroup> resolveSrv(
-        AddressResolver addressResolver, String host) throws Exception;
+    List<SrvRecord> resolveSrv(String host) throws Exception;
   }
 
   @Nullable
-  private ResourceResolver getResourceResolver() {
+  protected ResourceResolver getResourceResolver() {
+    if (!shouldUseJndi(enableJndi, enableJndiLocalhost, host)) {
+      return null;
+    }
     ResourceResolver rr;
     if ((rr = resourceResolver.get()) == null) {
       if (resourceResolverFactory != null) {
@@ -551,6 +669,15 @@ final class DnsNameResolver extends NameResolver {
     } catch (ClassNotFoundException e) {
       logger.log(Level.FINE, "Unable to find JndiResourceResolverFactory, skipping.", e);
       return null;
+    } catch (ClassCastException e) {
+      // This can happen if JndiResourceResolverFactory was removed by something like Proguard
+      // combined with a broken ClassLoader that prefers classes from the child over the parent
+      // while also not properly filtering dependencies in the parent that should be hidden. If the
+      // class loader prefers loading from the parent then ResourceresolverFactory would have also
+      // been loaded from the parent. If the class loader filtered deps, then
+      // JndiResourceResolverFactory wouldn't have been found.
+      logger.log(Level.FINE, "Unable to cast JndiResourceResolverFactory, skipping.", e);
+      return null;
     }
     Constructor<? extends ResourceResolverFactory> jndiCtor;
     try {
@@ -571,6 +698,7 @@ final class DnsNameResolver extends NameResolver {
           Level.FINE,
           "JndiResourceResolverFactory not available, skipping.",
           rrf.unavailabilityCause());
+      return null;
     }
     return rrf;
   }
@@ -587,7 +715,8 @@ final class DnsNameResolver extends NameResolver {
   }
 
   @VisibleForTesting
-  static boolean shouldUseJndi(boolean jndiEnabled, boolean jndiLocalhostEnabled, String target) {
+  protected static boolean shouldUseJndi(
+      boolean jndiEnabled, boolean jndiLocalhostEnabled, String target) {
     if (!jndiEnabled) {
       return false;
     }

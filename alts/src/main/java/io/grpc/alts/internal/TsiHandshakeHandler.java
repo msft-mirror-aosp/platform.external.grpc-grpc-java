@@ -17,119 +17,99 @@
 package io.grpc.alts.internal;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+import static io.grpc.alts.internal.AltsProtocolNegotiator.AUTH_CONTEXT_KEY;
+import static io.grpc.alts.internal.AltsProtocolNegotiator.TSI_PEER_KEY;
 
-import com.google.common.annotations.VisibleForTesting;
+import io.grpc.Attributes;
+import io.grpc.ChannelLogger;
+import io.grpc.ChannelLogger.ChannelLogLevel;
+import io.grpc.InternalChannelz.Security;
+import io.grpc.SecurityLevel;
+import io.grpc.alts.internal.TsiHandshakeHandler.HandshakeValidator.SecurityDetails;
+import io.grpc.internal.GrpcAttributes;
+import io.grpc.netty.InternalProtocolNegotiationEvent;
+import io.grpc.netty.ProtocolNegotiationEvent;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.ByteToMessageDecoder;
-import io.netty.util.ReferenceCountUtil;
 import java.security.GeneralSecurityException;
 import java.util.List;
-import java.util.concurrent.Future;
 import javax.annotation.Nullable;
 
 /**
- * Performs The TSI Handshake. When the handshake is complete, it fires a user event with a {@link
- * TsiHandshakeCompletionEvent} indicating the result of the handshake.
+ * Performs The TSI Handshake.
  */
 public final class TsiHandshakeHandler extends ByteToMessageDecoder {
-  private static final int HANDSHAKE_FRAME_SIZE = 1024;
-
-  private final NettyTsiHandshaker handshaker;
-  private boolean started;
-
   /**
-   * This buffer doesn't store any state. We just hold onto it in case we end up allocating a buffer
-   * that ends up being unused.
+   * Validates a Tsi Peer object.
    */
-  private ByteBuf buffer;
+  public abstract static class HandshakeValidator {
 
-  public TsiHandshakeHandler(NettyTsiHandshaker handshaker) {
-    this.handshaker = checkNotNull(handshaker);
-  }
+    public static final class SecurityDetails {
 
-  /**
-   * Event that is fired once the TSI handshake is complete, which may be because it was successful
-   * or there was an error.
-   */
-  public static final class TsiHandshakeCompletionEvent {
+      private final SecurityLevel securityLevel;
+      private final Security security;
 
-    private final Throwable cause;
-    private final TsiPeer peer;
-    private final Object context;
-    private final TsiFrameProtector protector;
+      /**
+       * Constructs SecurityDetails.
+       */
+      public SecurityDetails(io.grpc.SecurityLevel securityLevel, @Nullable Security security) {
+        this.securityLevel = checkNotNull(securityLevel, "securityLevel");
+        this.security = security;
+      }
 
-    /** Creates a new event that indicates a successful handshake. */
-    @VisibleForTesting
-    TsiHandshakeCompletionEvent(
-        TsiFrameProtector protector, TsiPeer peer, @Nullable Object peerObject) {
-      this.cause = null;
-      this.peer = checkNotNull(peer);
-      this.protector = checkNotNull(protector);
-      this.context = peerObject;
-    }
+      public Security getSecurity() {
+        return security;
+      }
 
-    /** Creates a new event that indicates an unsuccessful handshake/. */
-    TsiHandshakeCompletionEvent(Throwable cause) {
-      this.cause = checkNotNull(cause);
-      this.peer = null;
-      this.protector = null;
-      this.context = null;
-    }
-
-    /** Return {@code true} if the handshake was successful. */
-    public boolean isSuccess() {
-      return cause == null;
+      public SecurityLevel getSecurityLevel() {
+        return securityLevel;
+      }
     }
 
     /**
-     * Return the {@link Throwable} if {@link #isSuccess()} returns {@code false} and so the
-     * handshake failed.
+     * Validates a Tsi Peer object.
      */
-    @Nullable
-    public Throwable cause() {
-      return cause;
-    }
-
-    @Nullable
-    public TsiPeer peer() {
-      return peer;
-    }
-
-    @Nullable
-    public Object context() {
-      return context;
-    }
-
-    @Nullable
-    TsiFrameProtector protector() {
-      return protector;
-    }
+    public abstract SecurityDetails validatePeerObject(Object peerObject)
+        throws GeneralSecurityException;
   }
 
-  @Override
-  public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
-    maybeStart(ctx);
-    super.handlerAdded(ctx);
+  private static final int HANDSHAKE_FRAME_SIZE = 1024;
+
+  private final NettyTsiHandshaker handshaker;
+  private final HandshakeValidator handshakeValidator;
+  private final ChannelHandler next;
+  private final AsyncSemaphore semaphore;
+
+  private ProtocolNegotiationEvent pne;
+  private boolean semaphoreAcquired;
+  private final ChannelLogger negotiationLogger;
+
+  /**
+   * Constructs a TsiHandshakeHandler.
+   */
+  public TsiHandshakeHandler(
+      ChannelHandler next, NettyTsiHandshaker handshaker, HandshakeValidator handshakeValidator,
+      ChannelLogger negotiationLogger) {
+    this(next, handshaker, handshakeValidator, null, negotiationLogger);
   }
 
-  @Override
-  public void channelActive(ChannelHandlerContext ctx) throws Exception {
-    maybeStart(ctx);
-    super.channelActive(ctx);
-  }
-
-  @Override
-  public void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
-    close();
-    super.handlerRemoved0(ctx);
-  }
-
-  @Override
-  public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-    ctx.fireUserEventTriggered(new TsiHandshakeCompletionEvent(cause));
-    super.exceptionCaught(ctx, cause);
+  /**
+   * Constructs a TsHandshakeHandler. If a semaphore is provided, a permit from the semaphore is
+   * required to start the handshake and is returned when the handshake ends.
+   */
+  public TsiHandshakeHandler(
+      ChannelHandler next, NettyTsiHandshaker handshaker, HandshakeValidator handshakeValidator,
+      AsyncSemaphore semaphore, ChannelLogger negotiationLogger) {
+    this.handshaker = checkNotNull(handshaker, "handshaker");
+    this.handshakeValidator = checkNotNull(handshakeValidator, "handshakeValidator");
+    this.next = checkNotNull(next, "next");
+    this.semaphore = semaphore;
+    this.negotiationLogger = negotiationLogger;
   }
 
   @Override
@@ -148,65 +128,123 @@ public final class TsiHandshakeHandler extends ByteToMessageDecoder {
 
     // If the handshake is complete, transition to the framing state.
     if (!handshaker.isInProgress()) {
+      TsiPeer peer = handshaker.extractPeer();
+      Object authContext = handshaker.extractPeerObject();
+      SecurityDetails details = handshakeValidator.validatePeerObject(authContext);
+      // createFrameProtector must be called last.
+      TsiFrameProtector protector = handshaker.createFrameProtector(ctx.alloc());
+      TsiFrameHandler framer;
+      boolean success = false;
       try {
-        ctx.pipeline().remove(this);
-        ctx.fireUserEventTriggered(
-            new TsiHandshakeCompletionEvent(
-                handshaker.createFrameProtector(ctx.alloc()),
-                handshaker.extractPeer(),
-                handshaker.extractPeerObject()));
-        // No need to do anything with the in buffer, it will be re added to the pipeline when this
-        // handler is removed.
+        framer = new TsiFrameHandler(protector);
+        // adding framer and next handler after this handler before removing Decoder (current
+        // handler). This will prevents any missing read from decoder and/or unframed write from
+        // next handler.
+        ctx.pipeline().addAfter(ctx.name(), null, framer);
+        ctx.pipeline().addAfter(ctx.pipeline().context(framer).name(), null, next);
+        ctx.pipeline().remove(ctx.name());
+        fireProtocolNegotiationEvent(ctx, peer, authContext, details);
+        success = true;
       } finally {
-        close();
+        if (!success && protector != null) {
+          protector.destroy();
+        }
       }
     }
   }
 
-  private void maybeStart(ChannelHandlerContext ctx) {
-    if (!started && ctx.channel().isActive()) {
-      started = true;
-      sendHandshake(ctx);
+  @Override
+  public void userEventTriggered(final ChannelHandlerContext ctx, Object evt) throws Exception {
+    if (evt instanceof ProtocolNegotiationEvent) {
+      checkState(pne == null, "negotiation already started");
+      pne = (ProtocolNegotiationEvent) evt;
+      negotiationLogger.log(ChannelLogLevel.INFO, "TsiHandshake started");
+      ChannelFuture acquire = semaphoreAcquire(ctx);
+      if (acquire.isSuccess()) {
+        semaphoreAcquired = true;
+        sendHandshake(ctx);
+      } else {
+        acquire.addListener(new ChannelFutureListener() {
+          @Override public void operationComplete(ChannelFuture future) {
+            if (!future.isSuccess()) {
+              ctx.fireExceptionCaught(future.cause());
+              return;
+            }
+            if (ctx.isRemoved()) {
+              semaphoreRelease();
+              return;
+            }
+            semaphoreAcquired = true;
+            try {
+              sendHandshake(ctx);
+            } catch (Exception ex) {
+              ctx.fireExceptionCaught(ex);
+            }
+            ctx.flush();
+          }
+        });
+      }
+    } else {
+      super.userEventTriggered(ctx, evt);
     }
+  }
+
+  private void fireProtocolNegotiationEvent(
+      ChannelHandlerContext ctx, TsiPeer peer, Object authContext, SecurityDetails details) {
+    checkState(pne != null, "negotiation not yet complete");
+    negotiationLogger.log(ChannelLogLevel.INFO, "TsiHandshake finished");
+    ProtocolNegotiationEvent localPne = pne;
+    Attributes.Builder attrs = InternalProtocolNegotiationEvent.getAttributes(localPne).toBuilder()
+        .set(TSI_PEER_KEY, peer)
+        .set(AUTH_CONTEXT_KEY, authContext)
+        .set(GrpcAttributes.ATTR_SECURITY_LEVEL, details.getSecurityLevel());
+    localPne = InternalProtocolNegotiationEvent.withAttributes(localPne, attrs.build());
+    localPne = InternalProtocolNegotiationEvent.withSecurity(localPne, details.getSecurity());
+    ctx.fireUserEventTriggered(localPne);
   }
 
   /** Sends as many bytes as are available from the handshaker to the remote peer. */
-  private void sendHandshake(ChannelHandlerContext ctx) {
-    boolean needToFlush = false;
-
-    // Iterate until there is nothing left to write.
+  @SuppressWarnings("FutureReturnValueIgnored") // for addListener
+  private void sendHandshake(ChannelHandlerContext ctx) throws GeneralSecurityException {
     while (true) {
-      buffer = getOrCreateBuffer(ctx.alloc());
+      boolean written = false;
+      ByteBuf buf = ctx.alloc().buffer(HANDSHAKE_FRAME_SIZE).retain(); // refcnt = 2
       try {
-        handshaker.getBytesToSendToPeer(buffer);
+        handshaker.getBytesToSendToPeer(buf);
+        if (buf.isReadable()) {
+          ctx.writeAndFlush(buf).addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
+          written = true;
+        } else {
+          break;
+        }
       } catch (GeneralSecurityException e) {
-        throw new RuntimeException(e);
+        throw new GeneralSecurityException("TsiHandshakeHandler encountered exception", e);
+      } finally {
+        buf.release(written ? 1 : 2);
       }
-      if (!buffer.isReadable()) {
-        break;
-      }
-
-      needToFlush = true;
-      @SuppressWarnings("unused") // go/futurereturn-lsc
-      Future<?> possiblyIgnoredError = ctx.write(buffer);
-      buffer = null;
-    }
-
-    // If something was written, flush.
-    if (needToFlush) {
-      ctx.flush();
     }
   }
 
-  private ByteBuf getOrCreateBuffer(ByteBufAllocator alloc) {
-    if (buffer == null) {
-      buffer = alloc.buffer(HANDSHAKE_FRAME_SIZE);
+  @Override
+  protected void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
+    if (semaphoreAcquired) {
+      semaphoreRelease();
+      semaphoreAcquired = false;
     }
-    return buffer;
+    handshaker.close();
   }
 
-  private void close() {
-    ReferenceCountUtil.safeRelease(buffer);
-    buffer = null;
+  private ChannelFuture semaphoreAcquire(ChannelHandlerContext ctx) {
+    if (semaphore == null) {
+      return ctx.newSucceededFuture();
+    } else {
+      return semaphore.acquire(ctx);
+    }
+  }
+
+  private void semaphoreRelease() {
+    if (semaphore != null) {
+      semaphore.release();
+    }
   }
 }

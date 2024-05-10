@@ -21,6 +21,7 @@ import com.google.common.base.Preconditions;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
+import javax.annotation.Nullable;
 
 /**
  * Base class for a wrapper around another {@link ReadableBuffer}.
@@ -37,7 +38,7 @@ public abstract class ForwardingReadableBuffer implements ReadableBuffer {
    *
    * @param buf the underlying buffer
    */
-  public ForwardingReadableBuffer(ReadableBuffer buf) {
+  protected ForwardingReadableBuffer(ReadableBuffer buf) {
     this.buf = Preconditions.checkNotNull(buf, "buf");
   }
 
@@ -94,6 +95,32 @@ public abstract class ForwardingReadableBuffer implements ReadableBuffer {
   @Override
   public int arrayOffset() {
     return buf.arrayOffset();
+  }
+
+  @Override
+  public boolean markSupported() {
+    return buf.markSupported();
+  }
+
+  @Override
+  public void mark() {
+    buf.mark();
+  }
+
+  @Override
+  public void reset() {
+    buf.reset();
+  }
+
+  @Override
+  public boolean byteBufferSupported() {
+    return buf.byteBufferSupported();
+  }
+
+  @Nullable
+  @Override
+  public ByteBuffer getByteBuffer() {
+    return buf.getByteBuffer();
   }
 
   @Override

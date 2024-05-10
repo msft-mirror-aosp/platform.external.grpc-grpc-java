@@ -18,12 +18,16 @@ package io.grpc.internal;
 
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertEquals;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
-import io.grpc.internal.DnsNameResolver.AddressResolver;
+import io.grpc.internal.DnsNameResolver.SrvRecord;
+import io.grpc.internal.JndiResourceResolverFactory.JndiRecordFetcher;
 import io.grpc.internal.JndiResourceResolverFactory.JndiResourceResolver;
-import io.grpc.internal.JndiResourceResolverFactory.JndiResourceResolver.SrvRecord;
-import java.net.InetAddress;
+import io.grpc.internal.JndiResourceResolverFactory.RecordFetcher;
+import java.util.Arrays;
 import java.util.List;
+import org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement;
 import org.junit.Assume;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -46,19 +50,14 @@ public class JndiResourceResolverTest {
     assertEquals("blah\\blah", JndiResourceResolver.unquote("\"blah\\\\blah\""));
   }
 
+  @IgnoreJRERequirement
   @Test
   public void jndiResolverWorks() throws Exception {
     Assume.assumeNoException(new JndiResourceResolverFactory().unavailabilityCause());
 
-    AddressResolver addressResolver = new AddressResolver() {
-      @Override
-      public List<InetAddress> resolveAddress(String host) throws Exception {
-        return null;
-      }
-    };
-    JndiResourceResolver resolver = new JndiResourceResolver();
+    RecordFetcher recordFetcher = new JndiRecordFetcher();
     try {
-      resolver.resolveSrv(addressResolver, "localhost");
+      recordFetcher.getAllRecords("SRV", "dns:///localhost");
     } catch (javax.naming.CommunicationException e) {
       Assume.assumeNoException(e);
     } catch (javax.naming.NameNotFoundException e) {
@@ -67,9 +66,28 @@ public class JndiResourceResolverTest {
   }
 
   @Test
-  public void parseSrvRecord() {
-    SrvRecord record = JndiResourceResolver.parseSrvRecord("0 0 1234 foo.bar.com");
-    assertThat(record.host).isEqualTo("foo.bar.com");
-    assertThat(record.port).isEqualTo(1234);
+  public void txtRecordLookup() throws Exception {
+    RecordFetcher recordFetcher = mock(RecordFetcher.class);
+    when(recordFetcher.getAllRecords("TXT", "dns:///service.example.com"))
+        .thenReturn(Arrays.asList("foo", "\"bar\""));
+
+    List<String> golden = Arrays.asList("foo", "bar");
+    JndiResourceResolver resolver = new JndiResourceResolver(recordFetcher);
+    assertThat(resolver.resolveTxt("service.example.com")).isEqualTo(golden);
+  }
+
+  @SuppressWarnings("deprecation")
+  @Test
+  public void srvRecordLookup() throws Exception {
+    RecordFetcher recordFetcher = mock(RecordFetcher.class);
+    when(recordFetcher.getAllRecords("SRV", "dns:///service.example.com"))
+        .thenReturn(Arrays.asList(
+            "0 0 314 foo.example.com.", "0 0 42 bar.example.com.", "0 0 1 discard.example.com"));
+
+    List<SrvRecord> golden = Arrays.asList(
+        new SrvRecord("foo.example.com.", 314),
+        new SrvRecord("bar.example.com.", 42));
+    JndiResourceResolver resolver = new JndiResourceResolver(recordFetcher);
+    assertThat(resolver.resolveSrv("service.example.com")).isEqualTo(golden);
   }
 }

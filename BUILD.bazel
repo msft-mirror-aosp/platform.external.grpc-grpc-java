@@ -24,3 +24,48 @@ java_grpc_library(
     srcs = ["@com_google_protobuf//:api_proto"],
     deps = [":api_proto_java"],
 )
+
+java_library(
+    name = "java_grpc_library_deps__do_not_reference",
+    visibility = ["//visibility:public"],
+    exports = [
+        "//api",
+        "//protobuf",
+        "//stub",
+        "//stub:javax_annotation",
+        "@com_google_code_findbugs_jsr305//jar",
+        "@com_google_guava_guava//jar",
+        "@com_google_protobuf//:protobuf_java",
+    ],
+)
+
+java_library(
+    name = "java_lite_grpc_library_deps__do_not_reference",
+    visibility = ["//visibility:public"],
+    exports = [
+        "//api",
+        "//protobuf-lite",
+        "//stub",
+        "//stub:javax_annotation",
+        "@com_google_code_findbugs_jsr305//jar",
+        "@com_google_guava_guava//jar",
+    ],
+)
+
+java_plugin(
+    name = "auto_value",
+    generates_api = 1,
+    processor_class = "com.google.auto.value.processor.AutoValueProcessor",
+    deps = ["@com_google_auto_value_auto_value//jar"],
+)
+
+java_library(
+    name = "auto_value_annotations",
+    exported_plugins = [":auto_value"],
+    neverlink = 1,
+    visibility = ["//:__subpackages__"],
+    exports = [
+        "@com_google_auto_value_auto_value_annotations//jar",
+        "@org_apache_tomcat_annotations_api//jar",  # @Generated for Java 9+
+    ],
+)

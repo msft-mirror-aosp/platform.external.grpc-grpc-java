@@ -24,12 +24,14 @@ import static io.netty.buffer.Unpooled.EMPTY_BUFFER;
 import com.google.common.base.Preconditions;
 import com.google.common.io.BaseEncoding;
 import io.grpc.Attributes;
+import io.grpc.CallOptions;
 import io.grpc.InternalKnownTransport;
 import io.grpc.InternalMethodDescriptor;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.internal.AbstractClientStream;
+import io.grpc.internal.ClientStreamListener.RpcProgress;
 import io.grpc.internal.Http2ClientStreamTransportState;
 import io.grpc.internal.StatsTraceContext;
 import io.grpc.internal.TransportTracer;
@@ -42,6 +44,9 @@ import io.netty.channel.EventLoop;
 import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.handler.codec.http2.Http2Stream;
 import io.netty.util.AsciiString;
+import io.perfmark.PerfMark;
+import io.perfmark.Tag;
+import io.perfmark.TaskCloseable;
 import javax.annotation.Nullable;
 
 /**
@@ -50,13 +55,14 @@ import javax.annotation.Nullable;
  */
 class NettyClientStream extends AbstractClientStream {
   private static final InternalMethodDescriptor methodDescriptorAccessor =
-      new InternalMethodDescriptor(InternalKnownTransport.NETTY);
+      new InternalMethodDescriptor(
+          NettyClientTransport.class.getName().contains("grpc.netty.shaded")
+              ? InternalKnownTransport.NETTY_SHADED : InternalKnownTransport.NETTY);
 
   private final Sink sink = new Sink();
   private final TransportState state;
   private final WriteQueue writeQueue;
   private final MethodDescriptor<?, ?> method;
-  private final Channel channel;
   private AsciiString authority;
   private final AsciiString scheme;
   private final AsciiString userAgent;
@@ -70,17 +76,19 @@ class NettyClientStream extends AbstractClientStream {
       AsciiString scheme,
       AsciiString userAgent,
       StatsTraceContext statsTraceCtx,
-      TransportTracer transportTracer) {
+      TransportTracer transportTracer,
+      CallOptions callOptions,
+      boolean useGetForSafeMethods) {
     super(
         new NettyWritableBufferAllocator(channel.alloc()),
         statsTraceCtx,
         transportTracer,
         headers,
-        useGet(method));
+        callOptions,
+        useGetForSafeMethods && method.isSafe());
     this.state = checkNotNull(state, "transportState");
     this.writeQueue = state.handler.getWriteQueue();
     this.method = checkNotNull(method, "method");
-    this.channel = checkNotNull(channel, "channel");
     this.authority = checkNotNull(authority, "authority");
     this.scheme = checkNotNull(scheme, "scheme");
     this.userAgent = userAgent;
@@ -106,14 +114,17 @@ class NettyClientStream extends AbstractClientStream {
     return state.handler.getAttributes();
   }
 
-  private static boolean useGet(MethodDescriptor<?, ?> method) {
-    return method.isSafe();
-  }
-
   private class Sink implements AbstractClientStream.Sink {
-    @SuppressWarnings("BetaApi") // BaseEncoding is stable in Guava 20.0
+
     @Override
     public void writeHeaders(Metadata headers, byte[] requestPayload) {
+      try (TaskCloseable ignore =
+               PerfMark.traceTask("NettyClientStream$Sink.writeHeaders")) {
+        writeHeadersInternal(headers, requestPayload);
+      }
+    }
+
+    private void writeHeadersInternal(Metadata headers, byte[] requestPayload) {
       // Convert the headers into Netty HTTP/2 headers.
       AsciiString defaultPath = (AsciiString) methodDescriptorAccessor.geRawMethodName(method);
       if (defaultPath == null) {
@@ -141,26 +152,32 @@ class NettyClientStream extends AbstractClientStream {
             // Stream creation failed. Close the stream if not already closed.
             // When the channel is shutdown, the lifecycle manager has a better view of the failure,
             // especially before negotiation completes (because the negotiator commonly doesn't
-            // receive the execeptionCaught because NettyClientHandler does not propagate it).
+            // receive the exceptionCaught because NettyClientHandler does not propagate it).
             Status s = transportState().handler.getLifecycleManager().getShutdownStatus();
             if (s == null) {
               s = transportState().statusFromFailedFuture(future);
             }
-            transportState().transportReportStatus(s, true, new Metadata());
+            if (transportState().isNonExistent()) {
+              transportState().transportReportStatus(
+                  s, RpcProgress.MISCARRIED, true, new Metadata());
+            } else {
+              transportState().transportReportStatus(
+                  s, RpcProgress.PROCESSED, true, new Metadata());
+            }
           }
         }
       };
-
       // Write the command requesting the creation of the stream.
-      writeQueue.enqueue(new CreateStreamCommand(http2Headers, transportState(), get),
+      writeQueue.enqueue(
+          new CreateStreamCommand(http2Headers, transportState(), shouldBeCountedForInUse(), get),
           !method.getType().clientSendsOneMessage() || get).addListener(failureListener);
     }
 
-    @Override
-    public void writeFrame(
+    private void writeFrameInternal(
         WritableBuffer frame, boolean endOfStream, boolean flush, final int numMessages) {
       Preconditions.checkArgument(numMessages >= 0);
-      ByteBuf bytebuf = frame == null ? EMPTY_BUFFER : ((NettyWritableBuffer) frame).bytebuf();
+      ByteBuf bytebuf =
+          frame == null ? EMPTY_BUFFER : ((NettyWritableBuffer) frame).bytebuf().touch();
       final int numBytes = bytebuf.readableBytes();
       if (numBytes > 0) {
         // Add the bytes to outbound flow control.
@@ -181,58 +198,77 @@ class NettyClientStream extends AbstractClientStream {
             });
       } else {
         // The frame is empty and will not impact outbound flow control. Just send it.
-        writeQueue.enqueue(new SendGrpcFrameCommand(transportState(), bytebuf, endOfStream), flush);
+        writeQueue.enqueue(
+            new SendGrpcFrameCommand(transportState(), bytebuf, endOfStream), flush);
       }
     }
 
     @Override
-    public void request(final int numMessages) {
-      if (channel.eventLoop().inEventLoop()) {
-        // Processing data read in the event loop so can call into the deframer immediately
-        transportState().requestMessagesFromDeframer(numMessages);
-      } else {
-        channel.eventLoop().execute(new Runnable() {
-          @Override
-          public void run() {
-            transportState().requestMessagesFromDeframer(numMessages);
-          }
-        });
+    public void writeFrame(
+        WritableBuffer frame, boolean endOfStream, boolean flush, int numMessages) {
+      try (TaskCloseable ignore = PerfMark.traceTask("NettyClientStream$Sink.writeFrame")) {
+        writeFrameInternal(frame, endOfStream, flush, numMessages);
       }
     }
 
     @Override
     public void cancel(Status status) {
-      writeQueue.enqueue(new CancelClientStreamCommand(transportState(), status), true);
+      try (TaskCloseable ignore = PerfMark.traceTask("NettyClientStream$Sink.cancel")) {
+        writeQueue.enqueue(new CancelClientStreamCommand(transportState(), status), true);
+      }
     }
   }
 
-  /** This should only called from the transport thread. */
+  /** This should only be called from the transport thread. */
   public abstract static class TransportState extends Http2ClientStreamTransportState
       implements StreamIdHolder {
+    private static final int NON_EXISTENT_ID = -1;
+
+    private final String methodName;
     private final NettyClientHandler handler;
     private final EventLoop eventLoop;
     private int id;
     private Http2Stream http2Stream;
+    private Tag tag;
 
-    public TransportState(
+    protected TransportState(
         NettyClientHandler handler,
         EventLoop eventLoop,
         int maxMessageSize,
         StatsTraceContext statsTraceCtx,
-        TransportTracer transportTracer) {
+        TransportTracer transportTracer,
+        String methodName) {
       super(maxMessageSize, statsTraceCtx, transportTracer);
+      this.methodName = checkNotNull(methodName, "methodName");
       this.handler = checkNotNull(handler, "handler");
       this.eventLoop = checkNotNull(eventLoop, "eventLoop");
+      tag = PerfMark.createTag(methodName);
     }
 
     @Override
     public int id() {
+      // id should be positive
       return id;
     }
 
     public void setId(int id) {
-      checkArgument(id > 0, "id must be positive");
+      checkArgument(id > 0, "id must be positive %s", id);
+      checkState(this.id == 0, "id has been previously set: %s", this.id);
       this.id = id;
+      this.tag = PerfMark.createTag(methodName, id);
+    }
+
+    /**
+     * Marks the stream state as if it had never existed.  This can happen if the stream is
+     * cancelled after it is created, but before it has been started.
+     */
+    void setNonExistent() {
+      checkState(this.id == 0, "Id has been previously set: %s", this.id);
+      this.id = NON_EXISTENT_ID;
+    }
+
+    boolean isNonExistent() {
+      return this.id == NON_EXISTENT_ID || this.id == 0;
     }
 
     /**
@@ -303,6 +339,11 @@ class NettyClientStream extends AbstractClientStream {
 
     void transportDataReceived(ByteBuf frame, boolean endOfStream) {
       transportDataReceived(new NettyReadableBuffer(frame.retain()), endOfStream);
+    }
+
+    @Override
+    public final Tag tag() {
+      return tag;
     }
   }
 }

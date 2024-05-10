@@ -31,6 +31,9 @@ java_library {
     java_resource_dirs: [
         "src/main/resources",
     ],
+    static_libs: [
+        "grpc-java-api",
+    ],
     libs: [
         "grpc-java-context",
         "jsr305",
@@ -39,8 +42,18 @@ java_library {
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
     sdk_version: "current",
-    min_sdk_version: "33",
-    apex_available: ["com.android.adservices"],
+    min_sdk_version: "30",
+    apex_available: [
+        "com.android.adservices",
+        "com.android.devicelock",
+        "com.android.extservices",
+        "//apex_available:platform",
+    ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 java_library {
@@ -50,11 +63,14 @@ java_library {
         "src/main/java/io/grpc/inprocess/*.java",
     ],
     libs: [
+        "error_prone_annotations",
+        "grpc-java-annotation-stubs",
+        "grpc-java-api",
+        "grpc-java-context",
         "grpc-java-core",
         "grpc-java-core-internal",
-        "grpc-java-context",
-        "jsr305",
         "guava",
+        "jsr305",
     ],
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
@@ -69,6 +85,7 @@ java_library {
     ],
     libs: [
         "grpc-java-annotation-stubs",
+        "grpc-java-api",
         "grpc-java-core",
         "grpc-java-context",
         "jsr305",
@@ -77,9 +94,9 @@ java_library {
         "guava",
         "opencensus-java-api",
         "opencensus-java-contrib-grpc-metrics",
+        "perfmark-api-lib",
     ],
     target: {
-
         // For the Android variant, ignore this class since it is optional,
         // uses javax APIs not available on Android, and is used reflectively
         // so ignoring it does not affect the functionality of the library.
@@ -88,13 +105,25 @@ java_library {
                 "src/main/java/io/grpc/internal/JndiResourceResolverFactory.java",
             ],
         },
+        host: {
+            libs: [
+                "annotations",  // For android.annotation.SuppressLint
+            ]
+        },
+        windows: {
+            enabled: true,
+        },
     },
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
     sdk_version: "current",
-    min_sdk_version: "33",
-    apex_available: ["com.android.adservices"],
-
+    min_sdk_version: "30",
+    apex_available: [
+        "com.android.adservices",
+        "com.android.devicelock",
+        "com.android.extservices",
+        "//apex_available:platform",
+    ],
     errorprone: {
         javacflags: [
             "-Xep:BanJNDI:WARN",
@@ -109,6 +138,9 @@ java_library {
         "src/main/java/io/grpc/util/*.java",
     ],
     libs: [
+        "error_prone_annotations",
+        "grpc-java-annotation-stubs",
+        "grpc-java-api",
         "grpc-java-core",
         "grpc-java-core-internal",
         "jsr305",
@@ -117,4 +149,16 @@ java_library {
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
     sdk_version: "current",
+    min_sdk_version: "30",
+     apex_available: [
+         "com.android.adservices",
+         "com.android.devicelock",
+         "com.android.extservices",
+         "//apex_available:platform",
+     ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }

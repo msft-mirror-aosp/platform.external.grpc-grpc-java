@@ -28,6 +28,7 @@ java_library_host {
         "src/main/java/io/grpc/auth/*.java",
     ],
     libs: [
+        "grpc-java-api",
         "grpc-java-core",
         "google-auth-library-credentials-0.13.0",
         "guava",
@@ -35,4 +36,9 @@ java_library_host {
     ],
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
