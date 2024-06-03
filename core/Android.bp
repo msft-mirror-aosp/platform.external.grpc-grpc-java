@@ -49,6 +49,11 @@ java_library {
         "com.android.extservices",
         "//apex_available:platform",
     ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 java_library {
@@ -70,6 +75,11 @@ java_library {
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
     sdk_version: "current",
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 java_library {
@@ -104,6 +114,9 @@ java_library {
             libs: [
                 "annotations",  // For android.annotation.SuppressLint
             ]
+        },
+        windows: {
+            enabled: true,
         },
     },
     // b/267831518: Pin tradefed and dependencies to Java 11.
@@ -148,4 +161,9 @@ java_library {
          "com.android.extservices",
          "//apex_available:platform",
      ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }

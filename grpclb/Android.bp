@@ -1,0 +1,34 @@
+java_library_host {
+    name: "grpc-java-grpclb",
+    defaults: ["grpc-java-default-visibility"],
+    srcs: [
+        "src/generated/main/**/*.java",
+        "src/main/java/**/*.java",
+        "src/main/proto/**/*.proto",
+    ],
+    libs: [
+        "auto_value_annotations",
+        "libprotobuf-java-util-full",
+        "grpc-java-api",
+        "grpc-java-context",
+        "grpc-java-core",
+        "grpc-java-core-internal",
+        "grpc-java-core-util",
+        "grpc-java-protobuf",
+        "grpc-java-protobuf-lite",
+        "grpc-java-stub",
+        "guava",
+        "javax_annotation-api_1.3.2",
+    ],
+    proto: {
+        type: "full",
+        canonical_path_from_root: false,
+        include_dirs: ["external/protobuf/src"],
+        local_include_dirs: ["src/main/proto"],
+    },
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
+}
