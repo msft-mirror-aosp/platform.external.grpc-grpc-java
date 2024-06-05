@@ -30,15 +30,30 @@ package {
 
 java_library_host {
     name: "grpc-java-netty-shaded",
+    // Dependencies below match Maven runtime dependencies of
+    // the prebuilt "grpc-netty-shaded-1.56.0-jar" library.
     static_libs: [
-        "grpc-netty-shaded-1.16.1-jar",
+        "error_prone_annotations",
+        "grpc-netty-shaded-1.56.0-jar",
+        "guava",
+        "perfmark-api-lib",
     ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 java_library {
     name: "grpc-java-netty-shaded-test",
+    // Dependencies below match Maven runtime dependencies of
+    // the prebuilt "grpc-netty-shaded-1.56.0-jar" library.
     static_libs: [
-        "grpc-netty-shaded-1.16.1-jar",
+        "error_prone_annotations",
+        "grpc-netty-shaded-1.56.0-jar",
+        "guava",
+        "perfmark-api-lib",
     ],
     visibility: ["//packages/modules/Bluetooth/android/pandora/server"],
 }

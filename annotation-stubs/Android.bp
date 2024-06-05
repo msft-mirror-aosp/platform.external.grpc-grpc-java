@@ -29,19 +29,41 @@ java_library {
         ":grpc-java-annotation-stubs-srcjar",
     ],
     sdk_version: "current",
+    min_sdk_version: "30",
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.adservices",
+        "com.android.devicelock",
+        "com.android.extservices",
+    ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
+}
+
+python_binary_host {
+    name: "gen_annotations",
+    srcs: [
+        "gen_annotations.py",
+    ],
+    version: {
+        py3: {
+            embedded_launcher: true,
+        },
+    },
 }
 
 gensrcs {
     name: "grpc-java-annotation-stubs-srcjar",
-    tool_files: [
-        "gen_annotations.py",
-    ],
     tools: [
         "soong_zip",
+        "gen_annotations",
     ],
-    cmd: "$(location gen_annotations.py) $(genDir)/java && " +
+    cmd: "$(location gen_annotations) $(genDir)/java && " +
          "$(location soong_zip) -jar -o $(out) -C $(genDir)/java -D $(genDir)/java",
     srcs: [
         // A dummy source file since Soong crashes otherwise.

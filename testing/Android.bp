@@ -33,16 +33,17 @@ java_library {
         "src/main/resources",
     ],
     libs: [
+        "grpc-java-api",
         "grpc-java-context",
         "grpc-java-core",
         "grpc-java-core-inprocess",
         "grpc-java-core-internal", // Not sure why this has to be here.
         "grpc-java-core-util",
         "grpc-java-stub",
-        "jsr305",
         "guava",
-        "truth-prebuilt",
+        "jsr305",
         "junit",
+        "truth",
     ],
     sdk_version: "current",
     // b/267831518: Pin tradefed and dependencies to Java 11.

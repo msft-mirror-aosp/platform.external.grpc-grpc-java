@@ -19,9 +19,14 @@ package io.grpc.internal;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import io.grpc.Attributes;
+import io.grpc.CallCredentials;
+import io.grpc.ChannelCredentials;
+import io.grpc.ChannelLogger;
+import io.grpc.HttpConnectProxiedSocketAddress;
 import java.io.Closeable;
 import java.net.SocketAddress;
 import java.util.concurrent.ScheduledExecutorService;
+import javax.annotation.CheckReturnValue;
 import javax.annotation.Nullable;
 
 /** Pre-configured factory for creating {@link ConnectionClientTransport} instances. */
@@ -32,10 +37,12 @@ public interface ClientTransportFactory extends Closeable {
    *
    * @param serverAddress the address that the transport is connected to
    * @param options additional configuration
+   * @param channelLogger logger for the transport.
    */
   ConnectionClientTransport newClientTransport(
       SocketAddress serverAddress,
-      ClientTransportOptions options);
+      ClientTransportOptions options,
+      ChannelLogger channelLogger);
 
   /**
    * Returns an executor for scheduling provided by the transport. The service should be configured
@@ -50,6 +57,14 @@ public interface ClientTransportFactory extends Closeable {
   ScheduledExecutorService getScheduledExecutorService();
 
   /**
+   * Swaps to a new ChannelCredentials with all other settings unchanged. Returns null if the
+   * ChannelCredentials is not supported by the current ClientTransportFactory settings.
+   */
+  @CheckReturnValue
+  @Nullable
+  SwapChannelCredentialsResult swapChannelCredentials(ChannelCredentials channelCreds);
+
+  /**
    * Releases any resources.
    *
    * <p>After this method has been called, it's no longer valid to call
@@ -59,16 +74,26 @@ public interface ClientTransportFactory extends Closeable {
   void close();
 
   /**
-   * Options passed to {@link #newClientTransport(SocketAddress, ClientTransportOptions)}. Although
-   * it is safe to save this object if received, it is generally expected that the useful fields are
-   * copied and then the options object is discarded. This allows using {@code final} for those
-   * fields as well as avoids retaining unused objects contained in the options.
+   * Options passed to {@link #newClientTransport}. Although it is safe to save this object if
+   * received, it is generally expected that the useful fields are copied and then the options
+   * object is discarded. This allows using {@code final} for those fields as well as avoids
+   * retaining unused objects contained in the options.
    */
-  public static final class ClientTransportOptions {
+  final class ClientTransportOptions {
+    private ChannelLogger channelLogger;
     private String authority = "unknown-authority";
     private Attributes eagAttributes = Attributes.EMPTY;
-    private @Nullable String userAgent;
-    private @Nullable ProxyParameters proxyParameters;
+    @Nullable private String userAgent;
+    @Nullable private HttpConnectProxiedSocketAddress connectProxiedSocketAddr;
+
+    public ChannelLogger getChannelLogger() {
+      return channelLogger;
+    }
+
+    public ClientTransportOptions setChannelLogger(ChannelLogger channelLogger) {
+      this.channelLogger = channelLogger;
+      return this;
+    }
 
     public String getAuthority() {
       return authority;
@@ -102,18 +127,19 @@ public interface ClientTransportFactory extends Closeable {
     }
 
     @Nullable
-    public ProxyParameters getProxyParameters() {
-      return proxyParameters;
+    public HttpConnectProxiedSocketAddress getHttpConnectProxiedSocketAddress() {
+      return connectProxiedSocketAddr;
     }
 
-    public ClientTransportOptions setProxyParameters(@Nullable ProxyParameters proxyParameters) {
-      this.proxyParameters = proxyParameters;
+    public ClientTransportOptions setHttpConnectProxiedSocketAddress(
+        @Nullable HttpConnectProxiedSocketAddress connectProxiedSocketAddr) {
+      this.connectProxiedSocketAddr = connectProxiedSocketAddr;
       return this;
     }
 
     @Override
     public int hashCode() {
-      return Objects.hashCode(authority, eagAttributes, userAgent, proxyParameters);
+      return Objects.hashCode(authority, eagAttributes, userAgent, connectProxiedSocketAddr);
     }
 
     @Override
@@ -125,7 +151,18 @@ public interface ClientTransportFactory extends Closeable {
       return this.authority.equals(that.authority)
           && this.eagAttributes.equals(that.eagAttributes)
           && Objects.equal(this.userAgent, that.userAgent)
-          && Objects.equal(this.proxyParameters, that.proxyParameters);
+          && Objects.equal(this.connectProxiedSocketAddr, that.connectProxiedSocketAddr);
+    }
+  }
+
+  final class SwapChannelCredentialsResult {
+    final ClientTransportFactory transportFactory;
+    @Nullable final CallCredentials callCredentials;
+
+    public SwapChannelCredentialsResult(
+        ClientTransportFactory transportFactory, @Nullable CallCredentials callCredentials) {
+      this.transportFactory = Preconditions.checkNotNull(transportFactory, "transportFactory");
+      this.callCredentials = callCredentials;
     }
   }
 }

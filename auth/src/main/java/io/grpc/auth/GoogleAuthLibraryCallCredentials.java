@@ -22,19 +22,18 @@ import com.google.auth.Credentials;
 import com.google.auth.RequestMetadataCallback;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.io.BaseEncoding;
-import io.grpc.CallCredentials2;
+import io.grpc.InternalMayRequireSpecificExecutor;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.SecurityLevel;
 import io.grpc.Status;
 import io.grpc.StatusException;
 import java.io.IOException;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.security.PrivateKey;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -44,15 +43,18 @@ import java.util.logging.Logger;
 import javax.annotation.Nullable;
 
 /**
- * Wraps {@link Credentials} as a {@link CallCredentials}.
+ * Wraps {@link Credentials} as a {@link io.grpc.CallCredentials}.
  */
-final class GoogleAuthLibraryCallCredentials extends CallCredentials2 {
+final class GoogleAuthLibraryCallCredentials extends io.grpc.CallCredentials
+    implements InternalMayRequireSpecificExecutor {
   private static final Logger log
       = Logger.getLogger(GoogleAuthLibraryCallCredentials.class.getName());
   private static final JwtHelper jwtHelper
       = createJwtHelperOrNull(GoogleAuthLibraryCallCredentials.class.getClassLoader());
-  private static final Class<? extends Credentials> googleCredentialsClass
+  private static final Class<? extends Credentials> GOOGLE_CREDENTIALS_CLASS
       = loadGoogleCredentialsClass();
+  private static final Class<?> APP_ENGINE_CREDENTIALS_CLASS
+      = loadAppEngineCredentials();
 
   private final boolean requirePrivacy;
   @VisibleForTesting
@@ -60,6 +62,8 @@ final class GoogleAuthLibraryCallCredentials extends CallCredentials2 {
 
   private Metadata lastHeaders;
   private Map<String, List<String>> lastMetadata;
+
+  private final boolean requiresSpecificExecutor;
 
   public GoogleAuthLibraryCallCredentials(Credentials creds) {
     this(creds, jwtHelper);
@@ -69,22 +73,26 @@ final class GoogleAuthLibraryCallCredentials extends CallCredentials2 {
   GoogleAuthLibraryCallCredentials(Credentials creds, JwtHelper jwtHelper) {
     checkNotNull(creds, "creds");
     boolean requirePrivacy = false;
-    if (googleCredentialsClass != null) {
+    if (GOOGLE_CREDENTIALS_CLASS != null) {
       // All GoogleCredentials instances are bearer tokens and should only be used on private
       // channels. This catches all return values from GoogleCredentials.getApplicationDefault().
       // This should be checked before upgrading the Service Account to JWT, as JWT is also a bearer
       // token.
-      requirePrivacy = googleCredentialsClass.isInstance(creds);
+      requirePrivacy = GOOGLE_CREDENTIALS_CLASS.isInstance(creds);
     }
     if (jwtHelper != null) {
       creds = jwtHelper.tryServiceAccountToJwt(creds);
     }
     this.requirePrivacy = requirePrivacy;
     this.creds = creds;
-  }
 
-  @Override
-  public void thisUsesUnstableApi() {}
+    // Cache the value so we only need to try to load the class once
+    if (APP_ENGINE_CREDENTIALS_CLASS == null) {
+      requiresSpecificExecutor = false;
+    } else {
+      requiresSpecificExecutor = APP_ENGINE_CREDENTIALS_CLASS.isInstance(creds);
+    }
+  }
 
   @Override
   public void applyRequestMetadata(
@@ -159,7 +167,7 @@ final class GoogleAuthLibraryCallCredentials extends CallCredentials2 {
     // Always use HTTPS, by definition.
     final String scheme = "https";
     final int defaultPort = 443;
-    String path = "/" + MethodDescriptor.extractFullServiceName(method.getFullMethodName());
+    String path = "/" + method.getServiceName();
     URI uri;
     try {
       uri = new URI(scheme, authority, path, null, null);
@@ -184,7 +192,6 @@ final class GoogleAuthLibraryCallCredentials extends CallCredentials2 {
     }
   }
 
-  @SuppressWarnings("BetaApi") // BaseEncoding is stable in Guava 20.0
   private static Metadata toHeaders(@Nullable Map<String, List<String>> metadata) {
     Metadata headers = new Metadata();
     if (metadata != null) {
@@ -245,31 +252,90 @@ final class GoogleAuthLibraryCallCredentials extends CallCredentials2 {
     return rawGoogleCredentialsClass.asSubclass(Credentials.class);
   }
 
+  @Nullable
+  private static Class<?> loadAppEngineCredentials() {
+    try {
+      return Class.forName("com.google.auth.appengine.AppEngineCredentials");
+    } catch (ClassNotFoundException ex) {
+      log.log(Level.FINE, "AppEngineCredentials not available in classloader", ex);
+      return null;
+    }
+  }
+
+  private static class MethodPair {
+    private final Method getter;
+    private final Method builderSetter;
+
+    private MethodPair(Method getter, Method builderSetter) {
+      this.getter = getter;
+      this.builderSetter = builderSetter;
+    }
+
+    private void apply(Credentials credentials, Object builder)
+        throws InvocationTargetException, IllegalAccessException {
+      builderSetter.invoke(builder, getter.invoke(credentials));
+    }
+  }
+
   @VisibleForTesting
   static class JwtHelper {
     private final Class<? extends Credentials> serviceAccountClass;
-    private final Constructor<? extends Credentials> jwtConstructor;
+    private final Method newJwtBuilder;
+    private final Method build;
     private final Method getScopes;
-    private final Method getClientId;
-    private final Method getClientEmail;
-    private final Method getPrivateKey;
-    private final Method getPrivateKeyId;
+    private final List<MethodPair> methodPairs;
 
     public JwtHelper(Class<?> rawServiceAccountClass, ClassLoader loader)
         throws ClassNotFoundException, NoSuchMethodException {
       serviceAccountClass = rawServiceAccountClass.asSubclass(Credentials.class);
       getScopes = serviceAccountClass.getMethod("getScopes");
-      getClientId = serviceAccountClass.getMethod("getClientId");
-      getClientEmail = serviceAccountClass.getMethod("getClientEmail");
-      getPrivateKey = serviceAccountClass.getMethod("getPrivateKey");
-      getPrivateKeyId = serviceAccountClass.getMethod("getPrivateKeyId");
       Class<? extends Credentials> jwtClass = Class.forName(
           "com.google.auth.oauth2.ServiceAccountJwtAccessCredentials", false, loader)
           .asSubclass(Credentials.class);
-      jwtConstructor
-          = jwtClass.getConstructor(String.class, String.class, PrivateKey.class, String.class);
+      newJwtBuilder = jwtClass.getDeclaredMethod("newBuilder");
+      Class<?> builderClass = newJwtBuilder.getReturnType();
+      build = builderClass.getMethod("build");
+
+      methodPairs = new ArrayList<>();
+
+      {
+        Method getter = serviceAccountClass.getMethod("getClientId");
+        Method setter = builderClass.getMethod("setClientId", getter.getReturnType());
+        methodPairs.add(new MethodPair(getter, setter));
+      }
+      {
+        Method getter = serviceAccountClass.getMethod("getClientEmail");
+        Method setter = builderClass.getMethod("setClientEmail", getter.getReturnType());
+        methodPairs.add(new MethodPair(getter, setter));
+      }
+      {
+        Method getter = serviceAccountClass.getMethod("getPrivateKey");
+        Method setter = builderClass.getMethod("setPrivateKey", getter.getReturnType());
+        methodPairs.add(new MethodPair(getter, setter));
+      }
+      {
+        Method getter = serviceAccountClass.getMethod("getPrivateKeyId");
+        Method setter = builderClass.getMethod("setPrivateKeyId", getter.getReturnType());
+        methodPairs.add(new MethodPair(getter, setter));
+      }
+      {
+        Method getter = serviceAccountClass.getMethod("getQuotaProjectId");
+        Method setter = builderClass.getMethod("setQuotaProjectId", getter.getReturnType());
+        methodPairs.add(new MethodPair(getter, setter));
+      }
     }
 
+    /**
+     * This method tries to convert a {@link Credentials} object to a
+     * ServiceAccountJwtAccessCredentials.  The original credentials will be returned if:
+     * <ul>
+     *   <li> The Credentials is not a ServiceAccountCredentials</li>
+     *   <li> The ServiceAccountCredentials has scopes</li>
+     *   <li> Something unexpected happens </li>
+     * </ul>
+     * @param creds the Credentials to convert
+     * @return either the original Credentials or a fully formed ServiceAccountJwtAccessCredentials.
+     */
     public Credentials tryServiceAccountToJwt(Credentials creds) {
       if (!serviceAccountClass.isInstance(creds)) {
         return creds;
@@ -282,16 +348,19 @@ final class GoogleAuthLibraryCallCredentials extends CallCredentials2 {
           // Leave as-is, since the scopes may limit access within the service.
           return creds;
         }
-        return jwtConstructor.newInstance(
-            getClientId.invoke(creds),
-            getClientEmail.invoke(creds),
-            getPrivateKey.invoke(creds),
-            getPrivateKeyId.invoke(creds));
+        // Create the JWT Credentials Builder
+        Object builder = newJwtBuilder.invoke(null);
+
+        // Get things from the credentials, and set them on the builder.
+        for (MethodPair pair : this.methodPairs) {
+          pair.apply(creds, builder);
+        }
+
+        // Call builder.build()
+        return (Credentials) build.invoke(builder);
       } catch (IllegalAccessException ex) {
         caughtException = ex;
       } catch (InvocationTargetException ex) {
-        caughtException = ex;
-      } catch (InstantiationException ex) {
         caughtException = ex;
       }
       if (caughtException != null) {
@@ -304,4 +373,15 @@ final class GoogleAuthLibraryCallCredentials extends CallCredentials2 {
       return creds;
     }
   }
+
+  /**
+   * This method is to support the hack for AppEngineCredentials which need to run on a
+   * specific thread.
+   * @return Whether a specific executor is needed or if any executor can be used
+   */
+  @Override
+  public boolean isSpecificExecutorRequired() {
+    return requiresSpecificExecutor;
+  }
+
 }

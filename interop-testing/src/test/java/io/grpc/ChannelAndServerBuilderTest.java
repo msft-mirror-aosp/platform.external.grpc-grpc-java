@@ -55,11 +55,15 @@ public class ChannelAndServerBuilderTest {
         ClassPath.from(loader).getTopLevelClassesRecursive("io.grpc");
     // Java 9 doesn't expose the URLClassLoader, which breaks searching through the classpath
     if (classInfos.isEmpty()) {
-      return new ArrayList<Object[]>();
+      return new ArrayList<>();
     }
-    List<Object[]> classes = new ArrayList<Object[]>();
+    List<Object[]> classes = new ArrayList<>();
     for (ClassInfo classInfo : classInfos) {
-      Class<?> clazz = Class.forName(classInfo.getName(), false /*initialize*/, loader);
+      String className = classInfo.getName();
+      if (className.contains("io.grpc.netty.shaded.io.netty")) {
+        continue;
+      }
+      Class<?> clazz = Class.forName(className, false /*initialize*/, loader);
       if (ServerBuilder.class.isAssignableFrom(clazz) && clazz != ServerBuilder.class) {
         classes.add(new Object[]{clazz});
       } else if (ManagedChannelBuilder.class.isAssignableFrom(clazz)

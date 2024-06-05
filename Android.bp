@@ -37,6 +37,15 @@ license {
     ],
 }
 
+java_defaults {
+    name: "grpc-java-default-visibility",
+    visibility: [
+        "//external/grpc-grpc-java:__subpackages__",
+        "//external/sdk-platform-java:__subpackages__",
+        "//tools/apksig",
+    ],
+}
+
 java_library_host {
     name: "grpc-java",
     static_libs: [
@@ -48,13 +57,20 @@ java_library_host {
         "grpc-java-core-util",
         "grpc-java-protobuf",
         "grpc-java-protobuf-lite",
+        "grpc-java-reflection",
         "grpc-java-stub",
     ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 java_library {
     name: "grpc-java-lite",
     static_libs: [
+        "grpc-java-api",
         "grpc-java-context",
         "grpc-java-core",
         "grpc-java-core-inprocess",
@@ -73,6 +89,7 @@ java_library {
         "grpc-java-context",
         "grpc-java-core",
         "grpc-java-core-internal",
+        "grpc-java-core-util",
         "grpc-java-protobuf-lite",
         "grpc-java-okhttp",
     ],
@@ -91,6 +108,8 @@ java_library {
         "android/src/main/java/io/grpc/android/*.java",
     ],
     libs: [
+        "error_prone_annotations",
+        "grpc-java-annotation-stubs",
         "grpc-java-core",
         "grpc-java-core-internal",
         "jsr305",
@@ -99,6 +118,7 @@ java_library {
     sdk_version: "current",
     min_sdk_version: "30",
     apex_available: [
+        "//apex_available:platform",
         "com.android.adservices",
         "com.android.devicelock",
         "com.android.extservices",

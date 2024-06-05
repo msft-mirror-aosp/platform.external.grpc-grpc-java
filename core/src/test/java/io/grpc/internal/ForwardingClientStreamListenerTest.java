@@ -16,13 +16,14 @@
 
 package io.grpc.internal;
 
-import static org.mockito.Matchers.same;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 import io.grpc.ForwardingTestUtil;
 import io.grpc.Metadata;
 import io.grpc.Status;
+import io.grpc.internal.ClientStreamListener.RpcProgress;
 import io.grpc.internal.StreamListener.MessageProducer;
 import java.lang.reflect.Method;
 import java.util.Collections;
@@ -61,8 +62,8 @@ public class ForwardingClientStreamListenerTest {
   public void closedTest() {
     Status status = Status.UNKNOWN;
     Metadata trailers = new Metadata();
-    forward.closed(status, trailers);
-    verify(mock).closed(same(status), same(trailers));
+    forward.closed(status, RpcProgress.PROCESSED, trailers);
+    verify(mock).closed(same(status), same(RpcProgress.PROCESSED), same(trailers));
   }
 
   @Test

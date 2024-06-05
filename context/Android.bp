@@ -42,5 +42,11 @@ java_library {
         "com.android.adservices",
         "com.android.devicelock",
         "com.android.extservices",
+        "//apex_available:platform",
     ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }

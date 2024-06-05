@@ -19,11 +19,14 @@ package io.grpc.internal;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
+import static io.grpc.internal.GrpcAttributes.ATTR_SECURITY_LEVEL;
 import static io.grpc.internal.GrpcUtil.ACCEPT_ENCODING_SPLITTER;
+import static io.grpc.internal.GrpcUtil.CONTENT_LENGTH_KEY;
 import static io.grpc.internal.GrpcUtil.MESSAGE_ACCEPT_ENCODING_KEY;
 import static io.grpc.internal.GrpcUtil.MESSAGE_ENCODING_KEY;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Throwables;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.grpc.Attributes;
 import io.grpc.Codec;
@@ -32,10 +35,15 @@ import io.grpc.CompressorRegistry;
 import io.grpc.Context;
 import io.grpc.DecompressorRegistry;
 import io.grpc.InternalDecompressorRegistry;
+import io.grpc.InternalStatus;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
+import io.grpc.SecurityLevel;
 import io.grpc.ServerCall;
 import io.grpc.Status;
+import io.perfmark.PerfMark;
+import io.perfmark.Tag;
+import io.perfmark.TaskCloseable;
 import java.io.InputStream;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -51,6 +59,7 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
 
   private final ServerStream stream;
   private final MethodDescriptor<ReqT, RespT> method;
+  private final Tag tag;
   private final Context.CancellableContext context;
   private final byte[] messageAcceptEncoding;
   private final DecompressorRegistry decompressorRegistry;
@@ -67,7 +76,7 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
   ServerCallImpl(ServerStream stream, MethodDescriptor<ReqT, RespT> method,
       Metadata inboundHeaders, Context.CancellableContext context,
       DecompressorRegistry decompressorRegistry, CompressorRegistry compressorRegistry,
-      CallTracer serverCallTracer) {
+      CallTracer serverCallTracer, Tag tag) {
     this.stream = stream;
     this.method = method;
     this.context = context;
@@ -76,18 +85,30 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
     this.compressorRegistry = compressorRegistry;
     this.serverCallTracer = serverCallTracer;
     this.serverCallTracer.reportCallStarted();
+    this.tag = tag;
   }
 
   @Override
   public void request(int numMessages) {
-    stream.request(numMessages);
+    try (TaskCloseable ignore = PerfMark.traceTask("ServerCall.request")) {
+      PerfMark.attachTag(tag);
+      stream.request(numMessages);
+    }
   }
 
   @Override
   public void sendHeaders(Metadata headers) {
+    try (TaskCloseable ignore = PerfMark.traceTask("ServerCall.sendHeaders")) {
+      PerfMark.attachTag(tag);
+      sendHeadersInternal(headers);
+    }
+  }
+
+  private void sendHeadersInternal(Metadata headers) {
     checkState(!sendHeadersCalled, "sendHeaders has already been called");
     checkState(!closeCalled, "call is closed");
 
+    headers.discardAll(CONTENT_LENGTH_KEY);
     headers.discardAll(MESSAGE_ENCODING_KEY);
     if (compressor == null) {
       compressor = Codec.Identity.NONE;
@@ -125,6 +146,13 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
 
   @Override
   public void sendMessage(RespT message) {
+    try (TaskCloseable ignore = PerfMark.traceTask("ServerCall.sendMessage")) {
+      PerfMark.attachTag(tag);
+      sendMessageInternal(message);
+    }
+  }
+
+  private void sendMessageInternal(RespT message) {
     checkState(sendHeadersCalled, "sendHeaders has not been called");
     checkState(!closeCalled, "call is closed");
 
@@ -137,7 +165,9 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
     try {
       InputStream resp = method.streamResponse(message);
       stream.writeMessage(resp);
-      stream.flush();
+      if (!getMethodDescriptor().getType().serverSendsOneMessage()) {
+        stream.flush();
+      }
     } catch (RuntimeException e) {
       close(Status.fromThrowable(e), new Metadata());
     } catch (Error e) {
@@ -164,11 +194,21 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
 
   @Override
   public boolean isReady() {
+    if (closeCalled) {
+      return false;
+    }
     return stream.isReady();
   }
 
   @Override
   public void close(Status status, Metadata trailers) {
+    try (TaskCloseable ignore = PerfMark.traceTask("ServerCall.close")) {
+      PerfMark.attachTag(tag);
+      closeInternal(status, trailers);
+    }
+  }
+
+  private void closeInternal(Status status, Metadata trailers) {
     checkState(!closeCalled, "call already closed");
     try {
       closeCalled = true;
@@ -190,7 +230,7 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
   }
 
   ServerStreamListener newServerStreamListener(ServerCall.Listener<ReqT> listener) {
-    return new ServerStreamListenerImpl<ReqT>(this, listener, context);
+    return new ServerStreamListenerImpl<>(this, listener, context);
   }
 
   @Override
@@ -206,6 +246,16 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
   @Override
   public MethodDescriptor<ReqT, RespT> getMethodDescriptor() {
     return method;
+  }
+
+  @Override
+  public SecurityLevel getSecurityLevel() {
+    final Attributes attributes = getAttributes();
+    if (attributes == null) {
+      return super.getSecurityLevel();
+    }
+    final SecurityLevel securityLevel = attributes.get(ATTR_SECURITY_LEVEL);
+    return securityLevel == null ? super.getSecurityLevel() : securityLevel;
   }
 
   /**
@@ -242,15 +292,26 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
           new Context.CancellationListener() {
             @Override
             public void cancelled(Context context) {
-              ServerStreamListenerImpl.this.call.cancelled = true;
+              // If the context has a cancellation cause then something exceptional happened
+              // and we should also mark the call as cancelled.
+              if (context.cancellationCause() != null) {
+                ServerStreamListenerImpl.this.call.cancelled = true;
+              }
             }
           },
           MoreExecutors.directExecutor());
     }
 
-    @SuppressWarnings("Finally") // The code avoids suppressing the exception thrown from try
     @Override
-    public void messagesAvailable(final MessageProducer producer) {
+    public void messagesAvailable(MessageProducer producer) {
+      try (TaskCloseable ignore = PerfMark.traceTask("ServerStreamListener.messagesAvailable")) {
+        PerfMark.attachTag(call.tag);
+        messagesAvailableInternal(producer);
+      }
+    }
+
+    @SuppressWarnings("Finally") // The code avoids suppressing the exception thrown from try
+    private void messagesAvailableInternal(final MessageProducer producer) {
       if (call.cancelled) {
         GrpcUtil.closeQuietly(producer);
         return;
@@ -269,42 +330,60 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
         }
       } catch (Throwable t) {
         GrpcUtil.closeQuietly(producer);
-        MoreThrowables.throwIfUnchecked(t);
+        Throwables.throwIfUnchecked(t);
         throw new RuntimeException(t);
       }
     }
 
     @Override
     public void halfClosed() {
-      if (call.cancelled) {
-        return;
-      }
+      try (TaskCloseable ignore = PerfMark.traceTask("ServerStreamListener.halfClosed")) {
+        PerfMark.attachTag(call.tag);
+        if (call.cancelled) {
+          return;
+        }
 
-      listener.onHalfClose();
+        listener.onHalfClose();
+      }
     }
 
     @Override
     public void closed(Status status) {
+      try (TaskCloseable ignore = PerfMark.traceTask("ServerStreamListener.closed")) {
+        PerfMark.attachTag(call.tag);
+        closedInternal(status);
+      }
+    }
+
+    private void closedInternal(Status status) {
+      Throwable cancelCause = null;
       try {
         if (status.isOk()) {
           listener.onComplete();
         } else {
           call.cancelled = true;
           listener.onCancel();
+          // The status will not have a cause in all failure scenarios but we want to make sure
+          // we always cancel the context with one to keep the context cancelled state consistent.
+          cancelCause = InternalStatus.asRuntimeException(
+              Status.CANCELLED.withDescription("RPC cancelled"), null, false);
         }
       } finally {
         // Cancel context after delivering RPC closure notification to allow the application to
         // clean up and update any state based on whether onComplete or onCancel was called.
-        context.cancel(null);
+        context.cancel(cancelCause);
       }
     }
 
     @Override
     public void onReady() {
-      if (call.cancelled) {
-        return;
+      try (TaskCloseable ignore = PerfMark.traceTask("ServerStreamListener.onReady")) {
+        PerfMark.attachTag(call.tag);
+        if (call.cancelled) {
+          return;
+        }
+        listener.onReady();
       }
-      listener.onReady();
     }
   }
 }

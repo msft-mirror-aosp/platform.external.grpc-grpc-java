@@ -33,15 +33,16 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.Status;
 import io.grpc.StatusException;
-import io.grpc.internal.testing.TestUtils;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NegotiationType;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.StreamObserver;
+import io.grpc.testing.TlsTesting;
 import io.netty.handler.ssl.SslContext;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -53,6 +54,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
@@ -109,7 +111,7 @@ public class StressTestClient {
 
   private Server metricsServer;
   private final Map<String, Metrics.GaugeResponse> gauges =
-      new ConcurrentHashMap<String, Metrics.GaugeResponse>();
+      new ConcurrentHashMap<>();
 
   private volatile boolean shutdown;
 
@@ -117,7 +119,7 @@ public class StressTestClient {
    * List of futures that {@link #blockUntilStressTestComplete()} waits for.
    */
   private final List<ListenableFuture<?>> workerFutures =
-      new ArrayList<ListenableFuture<?>>();
+      new ArrayList<>();
   private final List<ManagedChannel> channels = new ArrayList<>();
   private ListeningExecutorService threadpool;
 
@@ -230,8 +232,8 @@ public class StressTestClient {
         ManagedChannel channel = createChannel(address);
         channels.add(channel);
         for (int j = 0; j < stubsPerChannel; j++) {
-          String gaugeName =
-              String.format("/stress_test/server_%d/channel_%d/stub_%d/qps", serverIdx, i, j);
+          String gaugeName = String.format(
+              Locale.US, "/stress_test/server_%d/channel_%d/stub_%d/qps", serverIdx, i, j);
           Worker worker =
               new Worker(channel, testCaseWeightPairs, durationSecs, gaugeName);
 
@@ -325,7 +327,7 @@ public class StressTestClient {
   }
 
   private static List<List<String>> parseCommaSeparatedTuples(String str) {
-    List<List<String>> tuples = new ArrayList<List<String>>();
+    List<List<String>> tuples = new ArrayList<>();
     for (String tupleStr : Splitter.on(',').split(str)) {
       int splitIdx = tupleStr.lastIndexOf(':');
       if (splitIdx == -1) {
@@ -343,7 +345,7 @@ public class StressTestClient {
     if (useTestCa) {
       try {
         sslContext = GrpcSslContexts.forClient().trustManager(
-            TestUtils.loadCert("ca.pem")).build();
+            TlsTesting.loadCert("ca.pem")).build();
       } catch (Exception ex) {
         throw new RuntimeException(ex);
       }
@@ -513,6 +515,11 @@ public class StressTestClient {
       @Override
       protected ManagedChannel createChannel() {
         return Worker.this.channel;
+      }
+
+      @Override
+      protected ManagedChannelBuilder<?> createChannelBuilder() {
+        throw new UnsupportedOperationException();
       }
 
       @Override
