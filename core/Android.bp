@@ -97,9 +97,7 @@ java_library {
         "gson",
         "error_prone_annotations",
         "guava",
-        "opencensus-java-api",
-        "opencensus-java-contrib-grpc-metrics",
-        "perfmark-api-lib",
+        "perfmark",
     ],
     target: {
         // For the Android variant, ignore this class since it is optional,
