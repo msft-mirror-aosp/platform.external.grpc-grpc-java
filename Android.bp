@@ -37,6 +37,15 @@ license {
     ],
 }
 
+java_defaults {
+    name: "grpc-java-default-visibility",
+    visibility: [
+        "//external/grpc-grpc-java:__subpackages__",
+        "//external/sdk-platform-java:__subpackages__",
+        "//tools/apksig",
+    ],
+}
+
 java_library_host {
     name: "grpc-java",
     static_libs: [
@@ -51,6 +60,11 @@ java_library_host {
         "grpc-java-reflection",
         "grpc-java-stub",
     ],
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 java_library {
@@ -84,7 +98,7 @@ java_library {
     apex_available: [
         "com.android.adservices",
         "com.android.devicelock",
-        "com.android.extservices"
+        "com.android.extservices",
     ],
 }
 
