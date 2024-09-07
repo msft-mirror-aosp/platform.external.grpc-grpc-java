@@ -97,7 +97,7 @@ java_library {
         "gson",
         "error_prone_annotations",
         "guava",
-        "perfmark-api-lib",
+        "perfmark",
     ],
     target: {
         // For the Android variant, ignore this class since it is optional,
