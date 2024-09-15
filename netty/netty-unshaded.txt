@@ -1,0 +1,3 @@
+rule io.grpc.netty.shaded.io.netty.** io.netty.@1
+zap io.grpc.netty.shaded.io.grpc.**
+
