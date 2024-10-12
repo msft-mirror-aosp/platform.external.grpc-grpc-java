@@ -30,10 +30,11 @@ java_library {
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
     apex_available: [
-            "//apex_available:platform",
-            "com.android.adservices",
-            "com.android.devicelock",
-            "com.android.extservices",
+        "//apex_available:platform",
+        "com.android.adservices",
+        "com.android.devicelock",
+        "com.android.extservices",
+        "com.android.virt",
     ],
     target: {
         windows: {
