@@ -53,6 +53,7 @@ java_library {
         "com.android.adservices",
         "com.android.devicelock",
         "com.android.extservices",
+        "com.android.virt",
     ],
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
