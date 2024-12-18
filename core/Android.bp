@@ -47,6 +47,7 @@ java_library {
         "com.android.adservices",
         "com.android.devicelock",
         "com.android.extservices",
+        "com.android.virt",
         "//apex_available:platform",
     ],
     target: {
@@ -75,6 +76,11 @@ java_library {
     // b/267831518: Pin tradefed and dependencies to Java 11.
     java_version: "11",
     sdk_version: "current",
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 java_library {
@@ -92,7 +98,7 @@ java_library {
         "gson",
         "error_prone_annotations",
         "guava",
-        "perfmark-api-lib",
+        "perfmark",
     ],
     target: {
         // For the Android variant, ignore this class since it is optional,
@@ -105,8 +111,8 @@ java_library {
         },
         host: {
             libs: [
-                "annotations",  // For android.annotation.SuppressLint
-            ]
+                "annotations", // For android.annotation.SuppressLint
+            ],
         },
         windows: {
             enabled: true,
@@ -120,6 +126,7 @@ java_library {
         "com.android.adservices",
         "com.android.devicelock",
         "com.android.extservices",
+        "com.android.virt",
         "//apex_available:platform",
     ],
     errorprone: {
@@ -148,12 +155,13 @@ java_library {
     java_version: "11",
     sdk_version: "current",
     min_sdk_version: "30",
-     apex_available: [
-         "com.android.adservices",
-         "com.android.devicelock",
-         "com.android.extservices",
-         "//apex_available:platform",
-     ],
+    apex_available: [
+        "com.android.adservices",
+        "com.android.devicelock",
+        "com.android.extservices",
+        "com.android.virt",
+        "//apex_available:platform",
+    ],
     target: {
         windows: {
             enabled: true,
